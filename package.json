@@ -1,0 +1,36 @@
+{
+  "name": "autopool-telegram-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot for AutoPool DApp notifications",
+  "main": "ankr-bot.js",
+  "scripts": {
+    "start": "node ankr-bot.js",
+    "dev": "nodemon ankr-bot.js",
+    "test": "node test.js",
+    "test-connection": "node test-connection.js",
+    "test-v5": "node test-v5-connection.js",
+    "pm2:start": "pm2 start ecosystem.config.js",
+    "pm2:stop": "pm2 stop autopool-bot",
+    "pm2:restart": "pm2 restart autopool-bot",
+    "pm2:logs": "pm2 logs autopool-bot"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "dotenv": "^16.0.3",
+    "node-telegram-bot-api": "^0.66.0",
+    "pm2": "^6.0.8",
+    "web3": "^4.16.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.0"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "blockchain",
+    "web3",
+    "autopool"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
+}
