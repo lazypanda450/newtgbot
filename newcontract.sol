@@ -1,4 +1,8 @@
 /**
+ *Submitted for verification at BscScan.com on 2025-07-15
+*/
+
+/**
  *Submitted for verification at BscScan.com on 2025-07-14
 */
 
@@ -10,8 +14,6 @@ interface IERC20 {
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
     function balanceOf(address account) external view returns (uint256);
 }
-
-
 
 interface IAutoPoolFundV12 {
     function users(address user) external view returns (
@@ -40,59 +42,58 @@ contract AutoPoolFundV11 {
     IERC20 public usdt;
     address public admin;
     bool internal locked;
-    IAutoPoolFundV12 private oldV12Contract; // For V12 to V12 migration
+    IAutoPoolFundV12 private oldV12Contract;
 
     // Constants for ROI System
-    uint256 public constant ENTRY_FEE = 10 * 1e18; // 10 USDT
-    uint256 public constant REJOIN_FEE = 10 * 1e18; // 10 USDT (same as entry)
-    uint256 public constant ADMIN_FEE_PER_JOIN = 2 * 1e18; // 2 USDT admin fee
-    uint256 public constant ADMIN_FEE_FROM_ENTRY = 2 * 1e18; // 2 USDT admin fee
-    uint256 public constant HOURLY_ROI_AMOUNT = 5 * 1e18; // 5 USDT paid every hour automatically
-    uint256 public constant ROI_INTERVAL = 1 hours; // 1 hour interval for ROI accumulation
-    uint256 public constant MIN_CONTRACT_BALANCE = 200 * 1e18; // Minimum contract balance
-    uint256 public constant MIN_TOTAL_DIRECT_REFERRALS = 2; // Min total directs for ROI
-    uint256 public constant MIN_ACTIVE_DIRECT_REFERRALS = 1; // Min active directs for ROI
+    uint256 public constant ENTRY_FEE = 10 * 1e18;
+    uint256 public constant REJOIN_FEE = 10 * 1e18;
+    uint256 public constant ADMIN_FEE_PER_JOIN = 2 * 1e18;
+    uint256 public constant ADMIN_FEE_FROM_ENTRY = 2 * 1e18;
+    uint256 public constant HOURLY_ROI_AMOUNT = 5 * 1e18;
+    uint256 public constant ROI_INTERVAL = 1 hours;
+    uint256 public constant MIN_CONTRACT_BALANCE = 200 * 1e18;
+    uint256 public constant MIN_TOTAL_DIRECT_REFERRALS = 2;
+    uint256 public constant MIN_ACTIVE_DIRECT_REFERRALS = 1;
 
     // === COMBINED PROFIT SYSTEM ===
-    uint256 public constant AUTOPOOL_COMMISSION = 5 * 1e18; // 5 USDT per autopool cycle
-    uint256 public constant COMBINED_PROFIT_THRESHOLD = 20 * 1e18; // 20 USDT combined profit for rejoin eligibility
-    uint256 public constant MAX_PROFIT_CAP = 20 * 1e18; // 20 USDT maximum profit cap - no accumulation beyond this
-    uint256 public constant MIN_CLAIM_AMOUNT = 20 * 1e18; // 20 USDT minimum claim (FIXED: was 10 USDT)
-    uint256 public constant TEAM_POOL_SIZE = 2; // Binary system
+    uint256 public constant AUTOPOOL_COMMISSION = 5 * 1e18;
+    uint256 public constant COMBINED_PROFIT_THRESHOLD = 20 * 1e18;
+    uint256 public constant MAX_PROFIT_CAP = 20 * 1e18;
+    uint256 public constant MIN_CLAIM_AMOUNT = 20 * 1e18;
+    uint256 public constant TEAM_POOL_SIZE = 2;
     uint256 public maxAutopoolProcessingPerTx = 5;
     
     // === TEAM-BASED AUTOPOOL MAPPINGS ===
-    mapping(address => address[]) public teamAutopoolQueue; // teamLeader => queue
-    mapping(address => address) public userTeamLeader; // user => teamLeader
-    mapping(address => uint256) public autopoolPendingBalance; // user => pending autopool earnings
-    mapping(address => uint256) public autopoolTotalEarned; // user => total autopool earned
-    mapping(address => uint256) public autopoolPosition; // user => position in their team pool
-    mapping(address => bool) public isAutopoolActive; // user => active in autopool
+    mapping(address => address[]) public teamAutopoolQueue;
+    mapping(address => address) public userTeamLeader;
+    mapping(address => uint256) public autopoolPendingBalance;
+    mapping(address => uint256) public autopoolTotalEarned;
+    mapping(address => uint256) public autopoolPosition;
+    mapping(address => bool) public isAutopoolActive;
     
     // === COMBINED PROFIT TRACKING ===
-    mapping(address => uint256) public userPendingROI; // Accumulated hourly ROI payments (5 USDT/hour)
-    mapping(address => uint256) public userLastROIUpdate; // Last time ROI was calculated
-    mapping(address => uint256) public userCombinedProfits; // Total combined profits (ROI + autopool)
+    mapping(address => uint256) public userPendingROI;
+    mapping(address => uint256) public userLastROIUpdate;
+    mapping(address => uint256) public userCombinedProfits;
 
     // Migration control
     mapping(address => bool) public hasBeenMigrated;
     bool public migrationCompleted = false;
     uint256 public migratedUsersCount = 0;
-    uint256 public totalUsersToMigrate = 0;
     uint256 public migrationCurrentIndex = 0;
     address[] public migratedUsers;
 
     // User Structure
     struct User {
         address referrer;
-        uint256 totalEarned; // Total ROI earned by this user
-        uint256 lastJoinTime; // Timestamp of the last join/rejoin
-        uint256 lastROITime;  // Timestamp of the last ROI claim
-        uint256 joinCount;    // How many times the user has joined (including initial)
-        uint256 rejoinCount;  // How many times the user has rejoined
-        bool isActive;        // True if eligible to claim ROI in current cycle
-        bool reachedTotalLimit; // True if user has claimed max ROI for current cycle and needs to rejoin
-        uint256 directReferrals; // Total number of direct referrals
+        uint256 totalEarned;
+        uint256 lastJoinTime;
+        uint256 lastROITime;
+        uint256 joinCount;
+        uint256 rejoinCount;
+        bool isActive;
+        bool reachedTotalLimit;
+        uint256 directReferrals;
     }
 
     // Enhanced User Profile for return values
@@ -109,13 +110,13 @@ contract AutoPoolFundV11 {
 
     // Combined Profit Info struct
     struct CombinedProfitInfo {
-        uint256 pendingROI;             // Accumulated hourly ROI (5 USDT/hour)
-        uint256 autopoolEarnings;       // Autopool earnings (5 USDT per cycle)
-        uint256 totalCombinedProfits;   // Sum of both
-        uint256 thresholdForRejoin;     // 20 USDT threshold
-        bool eligibleForCombinedRejoin; // Can rejoin with combined profits
-        uint256 shortfallToThreshold;   // How much more needed
-        uint256 availableForClaim;      // Amount available to claim (if >= 20 USDT)
+        uint256 pendingROI;
+        uint256 autopoolEarnings;
+        uint256 totalCombinedProfits;
+        uint256 thresholdForRejoin;
+        bool eligibleForCombinedRejoin;
+        uint256 shortfallToThreshold;
+        uint256 availableForClaim;
         string status;
     }
 
@@ -127,7 +128,7 @@ contract AutoPoolFundV11 {
     uint256 public totalUsers;
     uint256 public totalFundsReceived;
     uint256 public totalPaidOut;
-    uint256 public totalCombinedProfitRejoins; // Track combined profit rejoins
+    uint256 public totalCombinedProfitRejoins;
 
     // Events
     event UserJoined(address indexed user, address indexed referrer, uint256 fee);
@@ -162,9 +163,9 @@ contract AutoPoolFundV11 {
     }
 
     constructor() {
-        usdt = IERC20(0x55d398326f99059fF775485246999027B3197955); // USDT (BSC)
-        admin = 0x3Da7310861fbBdf5105ea6963A2C39d0Cb34a4Ff; // Admin address
-        oldV12Contract = IAutoPoolFundV12(0x4317B4D50dDa70Ca6020fE1F3b48f4bE4a969f2b); // Old V12 contract for V12-to-V12 migration
+        usdt = IERC20(0x55d398326f99059fF775485246999027B3197955);
+        admin = 0x3Da7310861fbBdf5105ea6963A2C39d0Cb34a4Ff;
+        oldV12Contract = IAutoPoolFundV12(0x4317B4D50dDa70Ca6020fE1F3b48f4bE4a969f2b);
         users[admin].isActive = true;
         users[admin].lastJoinTime = block.timestamp;
         users[admin].joinCount = 1;
@@ -174,9 +175,8 @@ contract AutoPoolFundV11 {
     function join(address referrer) external migrationCompleteOnly noReentrant {
         User storage user = users[msg.sender];
 
-        // If user has reached ROI limit, they must rejoin
         if (user.reachedTotalLimit) {
-                    require(usdt.transferFrom(msg.sender, address(this), REJOIN_FEE), "Transfer failed");
+            require(usdt.transferFrom(msg.sender, address(this), REJOIN_FEE), "Transfer failed");
 
             user.rejoinCount += 1;
             user.reachedTotalLimit = false;
@@ -187,21 +187,18 @@ contract AutoPoolFundV11 {
             
             userLastROIUpdate[msg.sender] = block.timestamp;
 
-        require(usdt.transfer(admin, ADMIN_FEE_PER_JOIN), "Admin fee failed");
+            require(usdt.transfer(admin, ADMIN_FEE_PER_JOIN), "Admin fee failed");
             totalFundsReceived += REJOIN_FEE;
 
-            // Re-enter autopool system
             _enterUserIntoAutopool(msg.sender);
 
             emit UserRejoined(msg.sender, user.referrer, REJOIN_FEE);
             return;
         }
 
-        // First time join
         require(!user.isActive && user.joinCount == 0, "Already joined or active");
         require(usdt.transferFrom(msg.sender, address(this), ENTRY_FEE), "Fee transfer failed");
 
-        // Determine referrer
         address actualReferrer = admin;
         if (referrer != address(0) && referrer != msg.sender && users[referrer].isActive) {
             actualReferrer = referrer;
@@ -210,18 +207,15 @@ contract AutoPoolFundV11 {
         addToDownlines(actualReferrer, msg.sender);
         users[actualReferrer].directReferrals += 1;
 
-        // Initialize user
         user.isActive = true;
         user.lastJoinTime = block.timestamp;
         user.joinCount = 1;
         user.rejoinCount = 0;
         user.directReferrals = 0;
         
-        // Initialize ROI tracking for hourly payments
         userLastROIUpdate[msg.sender] = block.timestamp;
         userPendingROI[msg.sender] = 0;
 
-        // Enter autopool system
         _enterUserIntoAutopool(msg.sender);
 
         totalUsers += 1;
@@ -245,15 +239,12 @@ contract AutoPoolFundV11 {
         
         require(totalCombined >= COMBINED_PROFIT_THRESHOLD, "Need 20 USDT combined");
 
-        // Calculate proportional deduction (10 USDT total)
         uint256 roiDeduction = (REJOIN_FEE * pendingROI) / totalCombined;
         uint256 autopoolDeduction = REJOIN_FEE - roiDeduction;
         
-        // Deduct from both balances
         userPendingROI[msg.sender] -= roiDeduction;
         autopoolPendingBalance[msg.sender] -= autopoolDeduction;
         
-        // Update combined profits tracking
         userCombinedProfits[msg.sender] = userPendingROI[msg.sender] + autopoolPendingBalance[msg.sender];
 
         user.rejoinCount += 1;
@@ -263,15 +254,12 @@ contract AutoPoolFundV11 {
         user.lastROITime = 0;
         user.joinCount += 1;
         
-        // Reset ROI update time for new cycle
         userLastROIUpdate[msg.sender] = block.timestamp;
 
-        // Admin gets fee (already covered by deducted amounts)
         require(usdt.transfer(admin, ADMIN_FEE_PER_JOIN), "Admin fee failed");
         totalFundsReceived += REJOIN_FEE;
         totalCombinedProfitRejoins += 1;
 
-        // Re-enter autopool system
         _enterUserIntoAutopool(msg.sender);
 
         emit CombinedProfitRejoin(msg.sender, roiDeduction, autopoolDeduction, block.timestamp);
@@ -279,33 +267,28 @@ contract AutoPoolFundV11 {
     }
 
     // ROI System
-    
     function _updatePendingROI(address userAddr) internal {
         User storage user = users[userAddr];
         
-        // Only accumulate if user is active and hasn't reached limit
         if (!user.isActive || user.reachedTotalLimit) {
             return;
         }
         
-        // Check if user has already reached profit cap
         uint256 currentCombined = userPendingROI[userAddr] + autopoolPendingBalance[userAddr];
         if (currentCombined >= MAX_PROFIT_CAP) {
-            return; // Stop accumulating ROI if already at or above 20 USDT cap
+            return;
         }
         
-        // Check direct referral requirements
         uint256 totalDirects = getTotalDirectReferrals(userAddr);
         uint256 activeDirects = getActiveDirectReferrals(userAddr);
         
         if (totalDirects < MIN_TOTAL_DIRECT_REFERRALS || activeDirects < MIN_ACTIVE_DIRECT_REFERRALS) {
-            return; // Don't accumulate if requirements not met
+            return;
         }
         
-        // Check upline chain
         (bool isChainActive,) = isUplineChainActive(userAddr);
         if (!isChainActive) {
-            return; // Don't accumulate if upline chain broken
+            return;
         }
         
         uint256 lastUpdate = userLastROIUpdate[userAddr];
@@ -318,26 +301,22 @@ contract AutoPoolFundV11 {
         if (hoursPassed > 0) {
             uint256 roiToAdd = hoursPassed * HOURLY_ROI_AMOUNT;
             
-            // Apply profit cap: ensure combined profits don't exceed 20 USDT
             uint256 newCombined = currentCombined + roiToAdd;
             if (newCombined > MAX_PROFIT_CAP) {
-                roiToAdd = MAX_PROFIT_CAP - currentCombined; // Only add up to the cap
+                roiToAdd = MAX_PROFIT_CAP - currentCombined;
             }
             
             if (roiToAdd > 0) {
                 userPendingROI[userAddr] += roiToAdd;
                 userLastROIUpdate[userAddr] = lastUpdate + (hoursPassed * ROI_INTERVAL);
                 
-                // Update combined profits
                 userCombinedProfits[userAddr] = userPendingROI[userAddr] + autopoolPendingBalance[userAddr];
                 
                 emit HourlyROIAccumulated(userAddr, roiToAdd, userPendingROI[userAddr], block.timestamp);
                 
-                // Check if combined profits threshold reached
                 bool thresholdReached = userCombinedProfits[userAddr] >= COMBINED_PROFIT_THRESHOLD;
                 emit CombinedProfitUpdated(userAddr, userCombinedProfits[userAddr], thresholdReached);
                 
-                // Check if profit cap reached
                 if (userCombinedProfits[userAddr] >= MAX_PROFIT_CAP) {
                     emit ProfitCapReached(userAddr, userCombinedProfits[userAddr], block.timestamp);
                 }
@@ -348,6 +327,7 @@ contract AutoPoolFundV11 {
     function updatePendingROI(address userAddr) external {
         _updatePendingROI(userAddr);
     }
+
     function claimROI() external migrationCompleteOnly noReentrant {
         require(usdt.balanceOf(address(this)) >= MIN_CONTRACT_BALANCE, "Low balance");
         
@@ -377,7 +357,6 @@ contract AutoPoolFundV11 {
     }
 
     // Autopool System
-    
     function _enterUserIntoAutopool(address userAddr) internal {
         address teamLeader = _getTeamLeader(userAddr);
         userTeamLeader[userAddr] = teamLeader;
@@ -404,13 +383,11 @@ contract AutoPoolFundV11 {
             address payoutUser = queue[0];
             
             if (payoutUser != address(0)) {
-                // Check profit cap before adding autopool earnings
                 uint256 currentCombined = userPendingROI[payoutUser] + autopoolPendingBalance[payoutUser];
                 
                 if (currentCombined < MAX_PROFIT_CAP) {
                     uint256 autopoolToAdd = AUTOPOOL_COMMISSION;
                     
-                    // Apply profit cap for autopool earnings too
                     if (currentCombined + autopoolToAdd > MAX_PROFIT_CAP) {
                         autopoolToAdd = MAX_PROFIT_CAP - currentCombined;
                     }
@@ -419,24 +396,19 @@ contract AutoPoolFundV11 {
                         autopoolPendingBalance[payoutUser] += autopoolToAdd;
                         autopoolTotalEarned[payoutUser] += autopoolToAdd;
                         
-                        // Update combined profits
                         userCombinedProfits[payoutUser] = userPendingROI[payoutUser] + autopoolPendingBalance[payoutUser];
                         
                         emit AutopoolPayout(payoutUser, teamLeader, autopoolToAdd, 0);
                         
-                        // Check if combined profits threshold reached
                         bool thresholdReached = userCombinedProfits[payoutUser] >= COMBINED_PROFIT_THRESHOLD;
                         emit CombinedProfitUpdated(payoutUser, userCombinedProfits[payoutUser], thresholdReached);
                         
-                        // Check if profit cap reached
                         if (userCombinedProfits[payoutUser] >= MAX_PROFIT_CAP) {
                             emit ProfitCapReached(payoutUser, userCombinedProfits[payoutUser], block.timestamp);
                         }
                     }
                 }
-                // If user already at cap, they don't get autopool payout
                 
-                // Rotate queue regardless of payout (to keep autopool moving)
                 for (uint256 i = 0; i < queue.length - 1; i++) {
                     queue[i] = queue[i + 1];
                     autopoolPosition[queue[i]] = i;
@@ -565,11 +537,7 @@ contract AutoPoolFundV11 {
         );
     }
 
-    /**
-     * @dev Get combined profit information for a user
-     */
     function getCombinedProfitInfo(address userAddr) external view returns (CombinedProfitInfo memory) {
-        // Calculate current pending ROI
         uint256 currentPendingROI = _calculatePendingROI(userAddr);
         uint256 autopoolEarnings = autopoolPendingBalance[userAddr];
         uint256 totalCombined = currentPendingROI + autopoolEarnings;
@@ -615,24 +583,18 @@ contract AutoPoolFundV11 {
         );
     }
     
-    /**
-     * @dev Calculate pending ROI without updating state (view function)
-     * INCLUDES PROFIT CAP: No calculation beyond 20 USDT combined
-     */
     function _calculatePendingROI(address userAddr) internal view returns (uint256) {
         User memory user = users[userAddr];
         
         if (!user.isActive || user.reachedTotalLimit) {
-            return userPendingROI[userAddr]; // Return current balance without adding more
+            return userPendingROI[userAddr];
         }
         
-        // Check if already at profit cap
         uint256 currentCombined = userPendingROI[userAddr] + autopoolPendingBalance[userAddr];
         if (currentCombined >= MAX_PROFIT_CAP) {
-            return userPendingROI[userAddr]; // No more ROI if at cap
+            return userPendingROI[userAddr];
         }
         
-        // Check requirements (same as _updatePendingROI but read-only)
         uint256 totalDirects = getTotalDirectReferrals(userAddr);
         uint256 activeDirects = getActiveDirectReferrals(userAddr);
         
@@ -653,7 +615,6 @@ contract AutoPoolFundV11 {
         uint256 hoursPassed = (block.timestamp - lastUpdate) / ROI_INTERVAL;
         uint256 additionalROI = hoursPassed * HOURLY_ROI_AMOUNT;
         
-        // Apply profit cap
         uint256 projectedCombined = currentCombined + additionalROI;
         if (projectedCombined > MAX_PROFIT_CAP) {
             additionalROI = MAX_PROFIT_CAP - currentCombined;
@@ -662,9 +623,6 @@ contract AutoPoolFundV11 {
         return userPendingROI[userAddr] + additionalROI;
     }
 
-    /**
-     * @dev Simulate combined profit rejoin breakdown
-     */
     function simulateCombinedProfitRejoin(address userAddr) external view returns (
         uint256 totalCombinedProfits,
         uint256 roiDeduction,
@@ -695,9 +653,6 @@ contract AutoPoolFundV11 {
         }
     }
 
-    /**
-     * @dev Get economics breakdown for the new hourly system
-     */
     function getEconomicsBreakdown() external pure returns (
         uint256 entryFee,
         uint256 rejoinFee,
@@ -717,9 +672,6 @@ contract AutoPoolFundV11 {
         model = "Auto-accumulate 5 USDT/hour + 5 USDT autopool - Manual claim min 20 USDT each - Max 20 USDT profit cap - Rejoin with 10 USDT when total reaches 20 USDT";
     }
 
-    /**
-     * @dev Check ROI claim eligibility and show accumulation status
-     */
     function getROIClaimStatus(address userAddr) external view returns (
         bool canClaim,
         uint256 currentPendingROI,
@@ -746,7 +698,7 @@ contract AutoPoolFundV11 {
             canClaim = false;
             uint256 shortfall = minimumRequired - currentPendingROI;
             hoursUntilClaimable = shortfall / HOURLY_ROI_AMOUNT;
-            if (shortfall % HOURLY_ROI_AMOUNT > 0) hoursUntilClaimable += 1; // Round up
+            if (shortfall % HOURLY_ROI_AMOUNT > 0) hoursUntilClaimable += 1;
             
             status = string(abi.encodePacked(
                 "Need ", toString(hoursUntilClaimable), " more hours to reach 20 USDT minimum (currently ", 
@@ -807,10 +759,17 @@ contract AutoPoolFundV11 {
         require(usdt.transfer(admin, usdt.balanceOf(address(this))), "Withdraw failed");
     }
 
-
-
     function completeMigration() external onlyAdmin {
         migrationCompleted = true;
+        emit MigrationCompleted(migratedUsersCount, block.timestamp);
+    }
+
+    function resetMigrationCompletion() external onlyAdmin {
+        migrationCompleted = false;
+    }
+
+    function setMigrationIndex(uint256 newIndex) external onlyAdmin {
+        migrationCurrentIndex = newIndex;
     }
 
     function getMigrationStatus() external view returns (
@@ -820,82 +779,18 @@ contract AutoPoolFundV11 {
         return (migrationCompleted, migratedUsersCount);
     }
 
-
-    
-
-    
-    /**
-     * @dev Set basic user data (reduces stack depth)
-     */
-    function _setUserBasicData(
-        address userAddr,
-        address referrer,
-        uint256 totalEarned,
-        uint256 lastJoinTime,
-        uint256 lastROITime,
-        uint256 joinCount,
-        bool isActive,
-        bool reachedTotalLimit,
-        uint256 directReferrals
-    ) internal {
-        User storage newUser = users[userAddr];
-        newUser.referrer = referrer;
-        newUser.totalEarned = totalEarned;
-        newUser.lastJoinTime = lastJoinTime;
-        newUser.lastROITime = lastROITime;
-        newUser.joinCount = joinCount;
-        newUser.isActive = isActive;
-        newUser.reachedTotalLimit = reachedTotalLimit;
-        newUser.rejoinCount = 0;
-        newUser.directReferrals = directReferrals;
-    }
-    
-
-    
-    /**
-     * @dev Finalize user migration (reduces stack depth)
-     */
-    function _finalizeUserMigration(address userAddr) internal {
-        totalUsers++;
-        migratedUsersCount++;
-        hasBeenMigrated[userAddr] = true;
-        migratedUsers.push(userAddr);
-    }
-    
-
-    
-    /**
-     * @dev Check if user is already in array (utility function)
-     */
-    function _isUserInArray(address[] memory array, uint256 length, address user) internal pure returns (bool) {
-        for (uint256 i = 0; i < length; i++) {
-            if (array[i] == user) {
-                return true;
-            }
-        }
-        return false;
-    }
-    
-    /**
-     * @dev Get migration progress
-     */
     function getMigrationProgress() external view returns (
-        uint256 totalToMigrate,
         uint256 currentIndex,
         uint256 migratedCount,
         bool completed
     ) {
         return (
-            totalUsersToMigrate,
             migrationCurrentIndex,
             migratedUsersCount,
             migrationCompleted
         );
     }
-    
-    /**
-     * @dev Get migration status and preserved earnings for a user
-     */
+
     function getUserMigrationInfo(address userAddr) external view returns (
         bool isMigrated,
         uint256 preservedHourlyROI,
@@ -929,49 +824,24 @@ contract AutoPoolFundV11 {
             migrationStatus = "Not yet migrated from V10";
         }
     }
-    
 
+    // ========== OPTIMIZED V12 TO V12 MIGRATION FUNCTIONS ==========
 
-    // ========== V12 TO V12 MIGRATION FUNCTIONS ==========
-    
-    /**
-     * @dev Set old V12 contract address for V12 to V12 migration (admin only)
-     */
     function setOldV12Contract(address oldV12Address) external onlyAdmin {
         require(oldV12Address != address(0), "Invalid contract address");
         oldV12Contract = IAutoPoolFundV12(oldV12Address);
     }
-    
+
     /**
-     * @dev Migrate single user from old V12 contract
-     * 
-     * 🚨 CRITICAL: ACTIVE REFERRALS RESET TO 0 DURING MIGRATION! 🚨
-     * 
-     * Migration preserves:
-     * - Total direct referrals count (directReferrals)
-     * - All earnings, balances, and downline relationships
-     * - User status and join history
-     * 
-     * Migration resets to 0:
-     * - Active direct referrals (calculated with FIXED bug-free logic)
-     * - Users must rebuild active networks under correct verification
-     * - Prevents exploitation of old buggy active referral calculations
-     * 
-     * Post-migration: Active referrals will only count when downlines 
-     * have been migrated AND each has 2+ direct referrals themselves.
+     * @dev Migrate single user from old V12 contract - OPTIMIZED
+     * Gas optimized version with reduced external calls and stack depth
      */
     function migrateV12User(address userAddr) external onlyAdmin {
         require(address(oldV12Contract) != address(0), "Old V12 contract not set");
         require(!hasBeenMigrated[userAddr], "User already migrated");
         require(!migrationCompleted, "Migration completed");
         
-        // Check if user was already migrated in old contract
-        try oldV12Contract.hasBeenMigrated(userAddr) returns (bool wasMigrated) {
-            require(wasMigrated, "User was not migrated in old V12 contract");
-        } catch {
-            // If function doesn't exist, continue with migration
-        }
-        
+        // Single external call to get all user data
         (
             address oldReferrer,
             uint256 oldTotalEarned,
@@ -984,54 +854,17 @@ contract AutoPoolFundV11 {
             uint256 oldDirectReferrals
         ) = oldV12Contract.users(userAddr);
         
-        // Only migrate if user existed in old V12
-        if (oldLastJoinTime > 0) {
-            _setV12UserBasicData(userAddr, oldReferrer, oldTotalEarned, oldLastJoinTime, oldLastROITime, 
-                               oldJoinCount, oldRejoinCount, oldIsActive, oldReachedTotalLimit, oldDirectReferrals);
-            _setV12UserEarningsData(userAddr);
-            _migrateV12UserDownlines(userAddr);
-            
-            // Enter into autopool if active
-            if (oldIsActive && !oldReachedTotalLimit) {
-                _enterUserIntoAutopool(userAddr);
-            }
-            
-            _finalizeUserMigration(userAddr);
-        }
-    }
-    
-    /**
-     * @dev Auto-discover and migrate V12 users in batches (50 at a time)
-     * 
-     * 🚨 CRITICAL: ACTIVE REFERRALS RESET TO 0 FOR ALL USERS! 🚨
-     * 
-     * This function automatically discovers users from old V12 contract and migrates them:
-     * - No manual address input required
-     * - Processes up to 50 users per transaction (gas-safe)
-     * - Continues from where previous batch left off
-     * - Active referrals reset to 0 (calculated with FIXED logic)
-     * 
-     * Call repeatedly until all users are migrated.
-     */
-    function migrateV12UsersAuto(uint256 batchSize) external onlyAdmin {
-        require(address(oldV12Contract) != address(0), "Old V12 contract not set");
-        require(!migrationCompleted, "Migration completed");
-        require(batchSize > 0 && batchSize <= 50, "Batch size must be 1-50");
+        require(oldLastJoinTime > 0, "User does not exist in old V12 contract");
         
-        _processV12MigrationBatch(batchSize);
+        // Migrate user data in single function call
+        _migrateV12UserData(userAddr, oldReferrer, oldTotalEarned, oldLastJoinTime, 
+                           oldLastROITime, oldJoinCount, oldRejoinCount, oldIsActive, 
+                           oldReachedTotalLimit, oldDirectReferrals);
     }
-    
+
     /**
-     * @dev Batch migrate users from old V12 contract (manual address input)
-     * 
-     * 🚨 CRITICAL: ACTIVE REFERRALS RESET TO 0 FOR ALL USERS! 🚨
-     * 
-     * This batch migration applies the same reset logic as single user migration:
-     * - Total direct referrals preserved
-     * - Active referrals reset to 0 (calculated with FIXED logic)
-     * - Users must rebuild active networks under bug-free verification
-     * 
-     * Use migrateV12UsersAuto() for automatic discovery, or this for specific addresses.
+     * @dev Batch migrate users - OPTIMIZED
+     * Increased to 50 users max per batch for efficiency
      */
     function migrateV12UsersBatch(address[] calldata userAddrs) external onlyAdmin {
         require(address(oldV12Contract) != address(0), "Old V12 contract not set");
@@ -1040,112 +873,168 @@ contract AutoPoolFundV11 {
         
         for (uint256 i = 0; i < userAddrs.length; i++) {
             address userAddr = userAddrs[i];
-            if (hasBeenMigrated[userAddr]) continue;
-            
-            _migrateV12SingleUser(userAddr);
+            if (!hasBeenMigrated[userAddr]) {
+                _migrateV12UserQuick(userAddr);
+            }
         }
     }
-    
+
     /**
-     * @dev Internal function to process V12 migration in batches with auto-discovery
+     * @dev Auto-migrate with optimized gas usage - 50 users per batch
      */
-    function _processV12MigrationBatch(uint256 batchSize) internal {
-        uint256 processed = 0;
+    function migrateV12UsersAuto(uint256 batchSize) external onlyAdmin {
+        require(address(oldV12Contract) != address(0), "Old V12 contract not set");
+        require(!migrationCompleted, "Migration completed");
+        require(batchSize > 0 && batchSize <= 50, "Batch size must be 1-50");
         
-        // Get all users from old contract
-        address[] memory allV12Users = _getAllV12UsersFromOldContract();
+        _processV12MigrationBatchOptimized(batchSize);
+    }
+
+    /**
+     * @dev Manual migrate specific users - OPTIMIZED
+     */
+    function manualMigrateUsers(address[] calldata userAddresses) external onlyAdmin {
+        require(userAddresses.length <= 25, "Max 25 users");
         
-        // Initialize user discovery if first batch
-        if (totalUsersToMigrate == 0) {
-            totalUsersToMigrate = allV12Users.length;
-            
-            emit MigrationStarted(totalUsersToMigrate, block.timestamp);
+        for (uint256 i = 0; i < userAddresses.length; i++) {
+            if (!hasBeenMigrated[userAddresses[i]]) {
+                _migrateV12UserQuick(userAddresses[i]);
+            }
+        }
+    }
+
+    // ========== INTERNAL OPTIMIZED FUNCTIONS ==========
+
+    /**
+     * @dev Migrate user data in single internal call - OPTIMIZED
+     * Combines all migration steps to reduce stack depth
+     */
+    function _migrateV12UserData(
+        address userAddr,
+        address referrer,
+        uint256 totalEarned,
+        uint256 lastJoinTime,
+        uint256 lastROITime,
+        uint256 joinCount,
+        uint256 rejoinCount,
+        bool isActive,
+        bool reachedTotalLimit,
+        uint256 directReferrals
+    ) internal {
+        // Set basic user data
+        User storage newUser = users[userAddr];
+        newUser.referrer = referrer;
+        newUser.totalEarned = totalEarned;
+        newUser.lastJoinTime = lastJoinTime;
+        newUser.lastROITime = lastROITime;
+        newUser.joinCount = joinCount;
+        newUser.rejoinCount = rejoinCount;
+        newUser.isActive = isActive;
+        newUser.reachedTotalLimit = reachedTotalLimit;
+        newUser.directReferrals = directReferrals;
+        
+        // Get earnings data with single calls
+        userPendingROI[userAddr] = _getOldPendingROI(userAddr);
+        autopoolPendingBalance[userAddr] = _getOldAutopoolBalance(userAddr);
+        userCombinedProfits[userAddr] = userPendingROI[userAddr] + autopoolPendingBalance[userAddr];
+        userTotalROIClaims[userAddr] = _getOldROIClaims(userAddr);
+        userLastROIUpdate[userAddr] = block.timestamp;
+        
+        // Enter autopool if active (simplified)
+        if (isActive && !reachedTotalLimit) {
+            address teamLeader = (referrer != address(0) && users[referrer].isActive) ? referrer : admin;
+            userTeamLeader[userAddr] = teamLeader;
+            teamAutopoolQueue[teamLeader].push(userAddr);
+            autopoolPosition[userAddr] = teamAutopoolQueue[teamLeader].length - 1;
+            isAutopoolActive[userAddr] = true;
         }
         
-        // Process users starting from current index
-        for (uint256 i = migrationCurrentIndex; i < allV12Users.length && processed < batchSize; i++) {
-            address userAddr = allV12Users[i];
-            
-            if (!hasBeenMigrated[userAddr] && userAddr != address(0)) {
-                if (_migrateV12SingleUserSafe(userAddr)) {
-                    processed++;
-                }
+        // Finalize migration
+        totalUsers++;
+        migratedUsersCount++;
+        hasBeenMigrated[userAddr] = true;
+        migratedUsers.push(userAddr);
+    }
+
+    /**
+     * @dev Quick migration without downline migration to save gas
+     */
+    function _migrateV12UserQuick(address userAddr) internal {
+        if (hasBeenMigrated[userAddr]) return;
+        
+        try oldV12Contract.users(userAddr) returns (
+            address oldReferrer,
+            uint256 oldTotalEarned,
+            uint256 oldLastJoinTime,
+            uint256 oldLastROITime,
+            uint256 oldJoinCount,
+            uint256 oldRejoinCount,
+            bool oldIsActive,
+            bool oldReachedTotalLimit,
+            uint256 oldDirectReferrals
+        ) {
+            if (oldLastJoinTime > 0) {
+                _migrateV12UserData(userAddr, oldReferrer, oldTotalEarned, oldLastJoinTime, 
+                                   oldLastROITime, oldJoinCount, oldRejoinCount, oldIsActive, 
+                                   oldReachedTotalLimit, oldDirectReferrals);
             }
-            
-            migrationCurrentIndex++;
+        } catch {
+            // Skip failed migrations silently
+        }
+    }
+
+    /**
+     * @dev Optimized batch processing using migrated users array from old contract
+     */
+    function _processV12MigrationBatchOptimized(uint256 batchSize) internal {
+        uint256 processed = 0;
+        
+        // Get total users from old contract for boundary check
+        uint256 totalV12Users;
+        try oldV12Contract.totalUsers() returns (uint256 total) {
+            totalV12Users = total;
+        } catch {
+            return; // Exit if can't read total users
+        }
+        
+        // First, try to get users from migrated users array (V10->V12 users)
+        uint256 migratedUsersFromV10;
+        try oldV12Contract.migratedUsersCount() returns (uint256 count) {
+            migratedUsersFromV10 = count;
+        } catch {
+            migratedUsersFromV10 = 0;
+        }
+        
+        // Process migrated users first (these are confirmed to exist)
+        if (migrationCurrentIndex < migratedUsersFromV10) {
+            for (uint256 i = migrationCurrentIndex; i < migratedUsersFromV10 && processed < batchSize; i++) {
+                try oldV12Contract.migratedUsers(i) returns (address userAddr) {
+                    if (userAddr != address(0) && !hasBeenMigrated[userAddr]) {
+                        _migrateV12UserQuick(userAddr);
+                        processed++;
+                    }
+                } catch {
+                    // Skip invalid entries
+                }
+                migrationCurrentIndex++;
+            }
+        }
+        
+        // If we still need more users and haven't processed all, 
+        // mark migration as requiring manual intervention
+        if (processed == 0 && migrationCurrentIndex >= migratedUsersFromV10) {
+            // All auto-discoverable users have been processed
+            emit MigrationBatchCompleted(0, migrationCurrentIndex, block.timestamp);
+            return;
         }
         
         emit MigrationBatchCompleted(processed, migrationCurrentIndex, block.timestamp);
-        
-        // Check if migration completed
-        if (migrationCurrentIndex >= allV12Users.length) {
-            migrationCompleted = true;
-            emit MigrationCompleted(migratedUsersCount, block.timestamp);
-        }
     }
-    
+
     /**
-     * @dev Get all users from old V12 contract for comprehensive migration
+     * @dev Quick validation with single external call
      */
-    function _getAllV12UsersFromOldContract() internal view returns (address[] memory) {
-        uint256 v12TotalUsers = 0;
-        
-        // Get total users from old V12 contract
-        try oldV12Contract.totalUsers() returns (uint256 total) {
-            v12TotalUsers = total;
-        } catch {
-            return new address[](0);
-        }
-        
-        if (v12TotalUsers == 0) {
-            return new address[](0);
-        }
-        
-        // Create array to collect valid users
-        address[] memory tempUsers = new address[](v12TotalUsers + 100); // Extra space for safety
-        uint256 userCount = 0;
-        
-        // Try to get users by checking user IDs sequentially
-        // Most contracts store users with incremental IDs starting from 1
-        for (uint256 i = 1; i <= v12TotalUsers + 50; i++) {
-            try oldV12Contract.migratedUsers(i - 1) returns (address userAddr) {
-                if (userAddr != address(0) && _isValidV12User(userAddr)) {
-                    if (!_isUserInArray(tempUsers, userCount, userAddr)) {
-                        tempUsers[userCount] = userAddr;
-                        userCount++;
-                    }
-                }
-            } catch {
-                // Try alternative method - iterate through known patterns
-                address testAddr = address(uint160(i + 1000000)); // Some contracts use patterns
-                if (_isValidV12User(testAddr)) {
-                    if (!_isUserInArray(tempUsers, userCount, testAddr)) {
-                        tempUsers[userCount] = testAddr;
-                        userCount++;
-                    }
-                }
-            }
-        }
-        
-        // If we didn't find enough users, try getting them from events or other methods
-        if (userCount < v12TotalUsers / 2) {
-            // Alternative: Try to get users from admin or other known sources
-            // This would require knowledge of the old contract's user storage patterns
-        }
-        
-        // Create final array with actual user count
-        address[] memory finalUsers = new address[](userCount);
-        for (uint256 i = 0; i < userCount; i++) {
-            finalUsers[i] = tempUsers[i];
-        }
-        
-        return finalUsers;
-    }
-    
-    /**
-     * @dev Check if user exists and is valid in old V12 contract
-     */
-    function _isValidV12User(address userAddr) internal view returns (bool) {
+    function _isValidV12UserQuick(address userAddr) internal view returns (bool) {
         if (userAddr == address(0)) return false;
         
         try oldV12Contract.users(userAddr) returns (
@@ -1164,168 +1053,155 @@ contract AutoPoolFundV11 {
             return false;
         }
     }
-    
+
+    // ========== SAFE GETTER FUNCTIONS ==========
+
     /**
-     * @dev Safe migration of single V12 user with error handling
+     * @dev Safe getter for pending ROI
      */
-    function _migrateV12SingleUserSafe(address userAddr) internal returns (bool) {
-        try oldV12Contract.users(userAddr) returns (
-            address oldReferrer,
-            uint256 oldTotalEarned,
-            uint256 oldLastJoinTime,
-            uint256 oldLastROITime,
-            uint256 oldJoinCount,
-            uint256 oldRejoinCount,
-            bool oldIsActive,
-            bool oldReachedTotalLimit,
-            uint256 oldDirectReferrals
-        ) {
-            if (oldLastJoinTime > 0) {
-                _setV12UserBasicData(userAddr, oldReferrer, oldTotalEarned, oldLastJoinTime, oldLastROITime, 
-                                   oldJoinCount, oldRejoinCount, oldIsActive, oldReachedTotalLimit, oldDirectReferrals);
-                _setV12UserEarningsData(userAddr);
-                _migrateV12UserDownlines(userAddr);
-                
-                if (oldIsActive && !oldReachedTotalLimit) {
-                    _enterUserIntoAutopool(userAddr);
-                }
-                
-                _finalizeUserMigration(userAddr);
-                return true;
-            }
+    function _getOldPendingROI(address userAddr) internal view returns (uint256) {
+        try oldV12Contract.userPendingROI(userAddr) returns (uint256 pending) {
+            return pending;
         } catch {
-            return false;
-        }
-        return false;
-    }
-    
-    /**
-     * @dev Internal function to migrate a single V12 user
-     */
-    function _migrateV12SingleUser(address userAddr) internal {
-        try oldV12Contract.users(userAddr) returns (
-            address oldReferrer,
-            uint256 oldTotalEarned,
-            uint256 oldLastJoinTime,
-            uint256 oldLastROITime,
-            uint256 oldJoinCount,
-            uint256 oldRejoinCount,
-            bool oldIsActive,
-            bool oldReachedTotalLimit,
-            uint256 oldDirectReferrals
-        ) {
-            if (oldLastJoinTime > 0) {
-                _setV12UserBasicData(userAddr, oldReferrer, oldTotalEarned, oldLastJoinTime, oldLastROITime, 
-                                   oldJoinCount, oldRejoinCount, oldIsActive, oldReachedTotalLimit, oldDirectReferrals);
-                _setV12UserEarningsData(userAddr);
-                _migrateV12UserDownlines(userAddr);
-                
-                if (oldIsActive && !oldReachedTotalLimit) {
-                    _enterUserIntoAutopool(userAddr);
-                }
-                
-                _finalizeUserMigration(userAddr);
-            }
-        } catch {
-            // Skip users that can't be read
+            return 0;
         }
     }
-    
+
     /**
-     * @dev Set V12 user basic data (preserves V12 structure)
-     * 
-     * IMPORTANT: Active direct referrals are automatically reset to 0 during migration!
-     * - directReferrals (total count) is preserved from old contract
-     * - Active referrals are calculated dynamically using FIXED logic
-     * - Users must rebuild their active networks under correct verification
-     * - Active count will be 0 until downlines are migrated AND have 2+ directs each
+     * @dev Safe getter for autopool balance
      */
-    function _setV12UserBasicData(
-        address userAddr,
-        address referrer,
-        uint256 totalEarned,
-        uint256 lastJoinTime,
-        uint256 lastROITime,
-        uint256 joinCount,
-        uint256 rejoinCount,
-        bool isActive,
-        bool reachedTotalLimit,
-        uint256 directReferrals
-    ) internal {
-        User storage newUser = users[userAddr];
-        newUser.referrer = referrer;
-        newUser.totalEarned = totalEarned;
-        newUser.lastJoinTime = lastJoinTime;
-        newUser.lastROITime = lastROITime;
-        newUser.joinCount = joinCount;
-        newUser.rejoinCount = rejoinCount;
-        newUser.isActive = isActive;
-        newUser.reachedTotalLimit = reachedTotalLimit;
-        newUser.directReferrals = directReferrals; // Total direct count preserved
-        
-        // NOTE: Active direct referrals automatically reset to 0!
-        // They are calculated dynamically by getActiveDirectReferrals() with FIXED logic
-        // that requires each downline to have 2+ direct referrals themselves
+    function _getOldAutopoolBalance(address userAddr) internal view returns (uint256) {
+        try oldV12Contract.autopoolPendingBalance(userAddr) returns (uint256 balance) {
+            return balance;
+        } catch {
+            return 0;
+        }
     }
-    
+
     /**
-     * @dev Set V12 user earnings data (preserves existing balances)
+     * @dev Safe getter for ROI claims
      */
-    function _setV12UserEarningsData(address userAddr) internal {
-        try oldV12Contract.userPendingROI(userAddr) returns (uint256 oldPendingROI) {
-            userPendingROI[userAddr] = oldPendingROI;
+    function _getOldROIClaims(address userAddr) internal view returns (uint256) {
+        try oldV12Contract.userTotalROIClaims(userAddr) returns (uint256 claims) {
+            return claims;
         } catch {
-            userPendingROI[userAddr] = 0;
+            return 0;
         }
-        
-        try oldV12Contract.autopoolPendingBalance(userAddr) returns (uint256 oldAutopoolBalance) {
-            autopoolPendingBalance[userAddr] = oldAutopoolBalance;
-        } catch {
-            autopoolPendingBalance[userAddr] = 0;
-        }
-        
-        try oldV12Contract.userCombinedProfits(userAddr) returns (uint256 oldCombinedProfits) {
-            userCombinedProfits[userAddr] = oldCombinedProfits;
-        } catch {
-            userCombinedProfits[userAddr] = userPendingROI[userAddr] + autopoolPendingBalance[userAddr];
-        }
-        
-        try oldV12Contract.userTotalROIClaims(userAddr) returns (uint256 oldROIClaims) {
-            userTotalROIClaims[userAddr] = oldROIClaims;
-        } catch {
-            userTotalROIClaims[userAddr] = 0;
-        }
-        
-        userLastROIUpdate[userAddr] = block.timestamp;
     }
-    
+
     /**
-     * @dev Migrate V12 user downlines
+     * @dev Get simple migration stats
      */
-    function _migrateV12UserDownlines(address userAddr) internal {
-        // Try to get downlines from old contract
-        for (uint256 j = 0; j < 100; j++) { // Limit to prevent gas issues
-            try oldV12Contract.userDownlines(userAddr, j) returns (address downline) {
-                if (downline != address(0)) {
-                    userDownlines[userAddr].push(downline);
-                } else {
-                    break; // No more downlines
+    function getSimpleMigrationStats() external view returns (
+        uint256 migratedCount,
+        bool completed,
+        uint256 currentIndex
+    ) {
+        return (migratedUsersCount, migrationCompleted, migrationCurrentIndex);
+    }
+
+    /**
+     * @dev Get remaining users that need migration from old contract
+     * Returns actual user addresses instead of searching randomly
+     */
+    function getRemainingUsersToMigrate() external view onlyAdmin returns (
+        address[] memory remainingUsers,
+        uint256 remainingCount,
+        uint256 totalV12Users,
+        uint256 migratedV10Users
+    ) {
+        // Get counts from old contract
+        try oldV12Contract.totalUsers() returns (uint256 total) {
+            totalV12Users = total;
+        } catch {
+            totalV12Users = 0;
+        }
+        
+        try oldV12Contract.migratedUsersCount() returns (uint256 migrated) {
+            migratedV10Users = migrated;
+        } catch {
+            migratedV10Users = 0;
+        }
+        
+        // Create temporary array to collect remaining users
+        address[] memory tempUsers = new address[](migratedV10Users);
+        uint256 count = 0;
+        
+        // Check migrated users array from old contract
+        for (uint256 i = 0; i < migratedV10Users; i++) {
+            try oldV12Contract.migratedUsers(i) returns (address userAddr) {
+                if (userAddr != address(0) && !hasBeenMigrated[userAddr]) {
+                    tempUsers[count] = userAddr;
+                    count++;
                 }
             } catch {
-                break; // No more downlines or function doesn't exist
+                continue;
+            }
+        }
+        
+        // Create final array with exact count
+        remainingUsers = new address[](count);
+        for (uint256 i = 0; i < count; i++) {
+            remainingUsers[i] = tempUsers[i];
+        }
+        
+        remainingCount = count;
+    }
+
+    /**
+     * @dev Migrate remaining users using the specific addresses found
+     */
+    function migrateRemainingUsers() external onlyAdmin {
+        require(!migrationCompleted, "Migration already completed");
+        
+        (address[] memory remainingUsers, uint256 remainingCount,,) = this.getRemainingUsersToMigrate();
+        
+        require(remainingCount > 0, "No remaining users to migrate");
+        require(remainingCount <= 50, "Too many users - use batch migration");
+        
+        for (uint256 i = 0; i < remainingCount; i++) {
+            if (!hasBeenMigrated[remainingUsers[i]]) {
+                _migrateV12UserQuick(remainingUsers[i]);
             }
         }
     }
-    
+
+    /**
+     * @dev Check if all discoverable users have been migrated
+     */
+    function checkMigrationComplete() external view returns (
+        bool allUsersMigrated,
+        uint256 remainingUsers,
+        string memory status
+    ) {
+        try this.getRemainingUsersToMigrate() returns (
+            address[] memory /* remaining */,
+            uint256 count,
+            uint256 /* totalV12 */,
+            uint256 migratedV10
+        ) {
+            remainingUsers = count;
+            allUsersMigrated = (count == 0);
+            
+            if (allUsersMigrated) {
+                status = "All discoverable users migrated - ready to complete migration";
+            } else {
+                status = string(abi.encodePacked(
+                    toString(count), 
+                    " users remaining from discoverable ",
+                    toString(migratedV10),
+                    " V10->V12 migrated users"
+                ));
+            }
+        } catch {
+            allUsersMigrated = false;
+            remainingUsers = 0;
+            status = "Unable to check remaining users";
+        }
+    }
+
     /**
      * @dev Get V12 migration status
-     * 
-     * Returns information about V12-to-V12 migration setup.
-     * 
-     * IMPORTANT: During migration, all active direct referrals reset to 0!
-     * - Users keep their total direct referrals count
-     * - Active referrals recalculated with bug-free logic
-     * - Users must rebuild active networks under correct verification
      */
     function getV12MigrationInfo() external view returns (
         address oldV12ContractAddress,
