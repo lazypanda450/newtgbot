@@ -238,18 +238,18 @@ class AnkrAutoPoolBot {
                     return { events: [], currentBlock, fromBlock, toBlock };
                 }
 
-                // Get Join and Rejoin events only (V10 events)
+                // Get Join and Rejoin events only (V12 Final events)
                 const eventPromises = [];
                 
                 if (config.events.enableJoinNotifications) {
                     eventPromises.push(
-                        contract.getPastEvents('UserJoined', { fromBlock, toBlock })
+                        contract.getPastEvents('Join', { fromBlock, toBlock })
                     );
                 }
                 
                 if (config.events.enableRejoinNotifications) {
                     eventPromises.push(
-                        contract.getPastEvents('UserRejoined', { fromBlock, toBlock })
+                        contract.getPastEvents('Rejoin', { fromBlock, toBlock })
                     );
                 }
 
@@ -297,16 +297,16 @@ class AnkrAutoPoolBot {
         }
     }
 
-    // Process individual events (V10 events)
+    // Process individual events (V12 Final events)
     async processEvent(event) {
         try {
             let message = '';
             
             switch (event.event) {
-                case 'UserJoined':
+                case 'Join':
                     message = await this.formatJoinMessage(event);
                     break;
-                case 'UserRejoined':
+                case 'Rejoin':
                     message = await this.formatRejoinMessage(event);
                     break;
                 default:
@@ -321,7 +321,7 @@ class AnkrAutoPoolBot {
         }
     }
 
-        // Format join message (V11 contract - UserJoined event)
+        // Format join message (V12 Final contract - Join event)
     async formatJoinMessage(event) {
         const { user, referrer, fee } = event.returnValues;
         const txHash = event.transactionHash;
@@ -339,22 +339,22 @@ class AnkrAutoPoolBot {
         return message;
     }
 
-    // Format rejoin message (V11 contract - UserRejoined event)
+    // Format rejoin message (V12 Final contract - Rejoin event)
     async formatRejoinMessage(event) {
-        const { user, referrer, fee, timestamp } = event.returnValues;
+        const { user, referrer, fee } = event.returnValues;
         const txHash = event.transactionHash;
         const blockNumber = event.blockNumber;
         
-        // V11 rejoin fee is 10 USDT
+        // V12 Final rejoin fee is 10 USDT
         let rejoinFee = "10";
         let totalDeposited = "0";
         
         try {
-            // Get total deposited from V12 contract stats
+            // Get total deposited from V12 Final contract stats
             const result = await this.executeWithFailover(async (web3) => {
                 const contract = new web3.eth.Contract(config.contractABI, config.blockchain.contractAddress);
                 
-                            // V11 getContractStats returns: [totalUsersCount, contractBalance, totalFundsReceivedAmount, totalPaidOutAmount, totalCombinedProfitRejoinsCount]
+                            // V12 Final getContractStats returns: [totalUsersCount, contractBalance, totalFundsReceivedAmount, totalPaidOutAmount]
             const contractStats = await contract.methods.getContractStats().call();
             const totalDepositedAmount = parseFloat(contractStats[2]) / 1e18; // Convert from wei to USDT (index 2 for totalFundsReceivedAmount)
                 
@@ -366,10 +366,10 @@ class AnkrAutoPoolBot {
             totalDeposited = result.totalDeposited;
             
             console.log(`🔄 Rejoin detected for user ${user}`);
-            console.log(`📊 V11 Contract - Total deposited: ${totalDeposited} USDT`);
+            console.log(`📊 V12 Final Contract - Total deposited: ${totalDeposited} USDT`);
             
         } catch (error) {
-            console.warn('⚠️ Could not fetch V11 contract stats:', error.message);
+            console.warn('⚠️ Could not fetch V12 Final contract stats:', error.message);
             totalDeposited = "1000+"; // Fallback
         }
         
