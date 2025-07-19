@@ -1,5 +1,5 @@
 /**
- *Submitted for verification at BscScan.com on 2025-07-16
+ *Submitted for verification at BscScan.com on 2025-07-19
 */
 
 // SPDX-License-Identifier: MIT
@@ -17,9 +17,7 @@ interface IAutoPoolFundV12 {
         uint256 joinCount, uint256 rejoinCount, bool isActive, bool reachedTotalLimit, uint256 directReferrals
     );
     function userDownlines(address user, uint256 index) external view returns (address);
-    function userPendingROI(address user) external view returns (uint256);
     function autopoolPendingBalance(address user) external view returns (uint256);
-    function userTotalROIClaims(address user) external view returns (uint256);
     function migratedUsers(uint256 index) external view returns (address);
     function migratedUsersCount() external view returns (uint256);
     function totalUsers() external view returns (uint256);
@@ -29,50 +27,42 @@ contract AutoPoolFundV12Final {
     IERC20 public usdt;
     address public admin;
     bool internal locked;
+    bool public emergencyPaused;
     IAutoPoolFundV12 private oldV12Contract;
-    IAutoPoolFundV12 private secondV12Contract;
 
     // Constants
     uint256 public constant ENTRY_FEE = 10 * 1e18;
     uint256 public constant REJOIN_FEE = 10 * 1e18;
     uint256 public constant ADMIN_FEE_PER_JOIN = 2 * 1e18;
     uint256 public constant ADMIN_FEE_FROM_ENTRY = 2 * 1e18;
-    uint256 public constant HOURLY_ROI_AMOUNT = 5 * 1e18;
-    uint256 public constant ROI_INTERVAL = 1 hours;
     uint256 public constant MIN_CONTRACT_BALANCE = 200 * 1e18;
-    uint256 public constant MIN_TOTAL_DIRECT_REFERRALS = 2;
-    uint256 public constant MIN_ACTIVE_DIRECT_REFERRALS = 1;
-    uint256 public constant AUTOPOOL_COMMISSION = 5 * 1e18;
-    uint256 public constant COMBINED_PROFIT_THRESHOLD = 20 * 1e18;
-    uint256 public constant MAX_PROFIT_CAP = 20 * 1e18;
+    uint256 public constant AUTOPOOL_COMMISSION = 20 * 1e18;
     uint256 public constant MIN_CLAIM_AMOUNT = 20 * 1e18;
-    uint256 public constant TEAM_POOL_SIZE = 2;
-    uint256 public constant DAILY_SALARY = 50 * 1e18;
-    uint256 public constant SALARY_INTERVAL = 24 hours;
-    uint256 public constant SALARY_REJOIN_REQUIREMENT = 50;
+    uint256 public constant TEAM_POOL_SIZE = 3;
+    uint256 public constant MIN_DIRECT_FOR_CLAIM = 1;
+    uint256 public constant HOURLY_INCOME = 12 * 1e18;
+    uint256 public constant HOURLY_INCOME_INTERVAL = 1 hours;
+    uint256 public constant MIN_HOURLY_CLAIM = 12 * 1e18;
 
     struct User {
         address referrer;
         uint256 totalEarned;
         uint256 lastJoinTime;
-        uint256 lastROITime;
         uint256 joinCount;
         uint256 rejoinCount;
         bool isActive;
         bool reachedTotalLimit;
         uint256 directReferrals;
-        uint256 lastSalaryUpdate;
-        bool salaryEnabled;
+        uint256 lastPoolJoinTime;
+        uint256 lastHourlyUpdate;
+        uint256 activeDirects;
     }
 
     // Core mappings
     mapping(address => User) public users;
     mapping(address => address[]) public userDownlines;
-    mapping(address => uint256) public userPendingROI;
     mapping(address => uint256) public autopoolPendingBalance;
-    mapping(address => uint256) public userCombinedProfits;
-    mapping(address => uint256) public userTotalROIClaims;
-    mapping(address => uint256) public userLastROIUpdate;
+    mapping(address => uint256) public hourlyIncomePending;
 
     // Autopool mappings
     mapping(address => address[]) public teamAutopoolQueue;
@@ -80,6 +70,8 @@ contract AutoPoolFundV12Final {
     mapping(address => uint256) public autopoolTotalEarned;
     mapping(address => uint256) public autopoolPosition;
     mapping(address => bool) public isAutopoolActive;
+    mapping(address => uint256) public teamJoinCount; // Track joins per team leader
+    mapping(address => bool) public autopoolProcessing; // Race condition protection
 
     // Migration mappings
     mapping(address => bool) public hasBeenMigrated;
@@ -88,34 +80,32 @@ contract AutoPoolFundV12Final {
     uint256 public migratedUsersCount;
     uint256 public migrationCurrentIndex;
     bool public migrationCompleted;
-    uint8 public currentMigrationPhase; // 0=USER_DATA, 1=DOWNLINES, 2=COMPLETED
+    uint8 public currentMigrationPhase;
 
-    // Salary mappings
-    mapping(address => uint256) public pendingSalary;
-    uint256 public salaryEligibleUsers;
-    uint256 public totalSalaryPaid;
+    // New migration system
+    uint256 public newMigrationIndex;
+    uint256 public totalUsersMigrated;
+    bool public newMigrationActive;
 
     // State variables
     uint256 public totalUsers;
     uint256 public totalFundsReceived;
     uint256 public totalPaidOut;
-    uint256 public totalCombinedProfitRejoins;
+    uint256 public totalHourlyIncomePaid;
 
     event Join(address indexed user, address indexed referrer, uint256 fee);
     event Rejoin(address indexed user, address indexed referrer, uint256 fee);
-    event CombRejoin(address indexed user, uint256 roi, uint256 pool, uint256 time);
-    event ROIAdd(address indexed user, uint256 amount, uint256 total, uint256 time);
-    event ROIOut(address indexed user, uint256 amount);
     event PoolOut(address indexed user, address indexed leader, uint256 amount, uint256 pos);
     event PoolClaim(address indexed user, uint256 amount);
-    event CombClaim(address indexed user, uint256 roi, uint256 pool, uint256 total);
+    event HourlyIncomeAdd(address indexed user, uint256 amount, uint256 total, uint256 time);
+    event HourlyIncomeClaim(address indexed user, uint256 amount);
+    event AutopoolReset(address indexed user, uint256 resetAmount, string reason);
     event Migrate(address indexed user, address indexed referrer, uint256 dirs, uint256 earned);
     event DownMigrate(address indexed user, uint256 count);
     event BatchDone(uint256 batch, uint256 index, uint256 time);
     event MigrateDone(uint256 total, uint256 time);
-    event SalaryOn(address indexed user, uint256 rejoins, uint256 time);
-    event SalaryAdd(address indexed user, uint256 amount, uint256 total, uint256 time);
-    event SalaryOut(address indexed user, uint256 amount);
+    event EmergencyPause(uint256 timestamp);
+    event EmergencyUnpause(uint256 timestamp);
 
     modifier noReentrant() {
         require(!locked);
@@ -134,730 +124,561 @@ contract AutoPoolFundV12Final {
         _;
     }
 
+    modifier whenNotPaused() {
+        require(!emergencyPaused, "Contract is paused");
+        _;
+    }
+
+    modifier emergencyOnly() {
+        require(emergencyPaused, "Only during emergency");
+        _;
+    }
+
     constructor() {
         usdt = IERC20(0x55d398326f99059fF775485246999027B3197955);
         admin = 0x3Da7310861fbBdf5105ea6963A2C39d0Cb34a4Ff;
-        oldV12Contract = IAutoPoolFundV12(0x4317B4D50dDa70Ca6020fE1F3b48f4bE4a969f2b);
-        secondV12Contract = IAutoPoolFundV12(0x34b93858ee0eE4144aA6B2d894e72B36E232a465);
+        oldV12Contract = IAutoPoolFundV12(0x982e0C94E805eaa405E12E0ee0531A245934D244);
         users[admin].isActive = true;
         users[admin].lastJoinTime = block.timestamp;
         users[admin].joinCount = 1;
     }
 
-    // Join Function
-    function join(address referrer) external postMigration noReentrant {
+    // SIMPLIFIED: Check 1 direct referral that is active (Gas optimized)
+    function hasActiveDirectReferral(address userAddr) public view returns (bool) {
+        if (users[userAddr].directReferrals == 0) return false;
+        
+        // Check if any direct referral is active (cap loop to prevent gas issues)
+        address[] memory downlines = userDownlines[userAddr];
+        uint256 maxCheck = downlines.length > 50 ? 50 : downlines.length; // Gas limit protection
+        
+        for (uint256 i = 0; i < maxCheck; i++) {
+            if (downlines[i] != address(0) && users[downlines[i]].isActive) {
+                return true; // Found at least 1 active direct
+            }
+        }
+        return false; // No active directs found
+    }
+
+    // BUSINESS LOGIC: Either/Or system - user can claim EITHER autopool OR ROI
+    function getClaimableInfo(address userAddr) external view returns (
+        bool canClaimROI,
+        bool canClaimAutopool, 
+        uint256 roiAmount,
+        uint256 autopoolAmount,
+        string memory message
+    ) {
+        uint256 hourlyPending = this.getPendingHourlyIncome(userAddr);
+        uint256 autopoolPending = autopoolPendingBalance[userAddr];
+        bool hasRequiredDirects = hasActiveDirectReferral(userAddr);
+        
+        canClaimROI = hourlyPending >= MIN_HOURLY_CLAIM && hasRequiredDirects;
+        canClaimAutopool = autopoolPending >= MIN_CLAIM_AMOUNT && hasRequiredDirects;
+        
+        roiAmount = hourlyPending;
+        autopoolAmount = autopoolPending;
+        
+        if (!hasRequiredDirects) {
+            message = "Need 1 active direct to claim";
+        } else if (canClaimROI && canClaimAutopool) {
+            message = "You can claim EITHER ROI or autopool earnings";
+        } else if (canClaimROI) {
+            message = "Can claim ROI earnings";
+        } else if (canClaimAutopool) {
+            message = "Can claim autopool earnings";
+        } else {
+            message = "No claimable amounts available";
+        }
+    }
+
+    // BUSINESS LOGIC: Show user their earning options (Either/Or system)
+    function getEarningsOptions(address userAddr) external view returns (
+        uint256 roiAmount,
+        uint256 autopoolAmount,
+        bool canClaimROI,
+        bool canClaimAutopool,
+        bool hasRequiredDirects,
+        string memory options
+    ) {
+        uint256 hourlyPending = this.getPendingHourlyIncome(userAddr);
+        uint256 autopoolPending = autopoolPendingBalance[userAddr];
+        bool hasDirects = hasActiveDirectReferral(userAddr);
+        
+        bool _canClaimROI = hourlyPending >= MIN_HOURLY_CLAIM && hasDirects;
+        bool _canClaimAutopool = autopoolPending >= MIN_CLAIM_AMOUNT && hasDirects;
+        
+        string memory message;
+        if (_canClaimROI && _canClaimAutopool) {
+            message = "You can choose: Claim ROI OR claim autopool (both available)";
+        } else if (_canClaimROI) {
+            message = "ROI available for claiming";
+        } else if (_canClaimAutopool) {
+            message = "Autopool available for claiming";
+        } else {
+            message = "No earnings ready for claiming yet";
+        }
+        
+        return (
+            hourlyPending,
+            autopoolPending,
+            _canClaimROI,
+            _canClaimAutopool,
+            hasDirects,
+            message
+        );
+    }
+
+    // FIXED: Join Function with proper security and validation
+    function join(address referrer) external postMigration noReentrant whenNotPaused {
+        // CHECKS: Input validation
+        require(msg.sender != address(0), "Invalid sender address");
+        require(usdt.balanceOf(msg.sender) >= ENTRY_FEE, "Insufficient USDT balance");
+        require(usdt.balanceOf(address(this)) >= MIN_CONTRACT_BALANCE, "Contract balance too low");
+        
         User storage user = users[msg.sender];
 
         if (user.reachedTotalLimit) {
-            require(usdt.transferFrom(msg.sender, address(this), REJOIN_FEE));
+            // REJOIN LOGIC
+            require(usdt.balanceOf(msg.sender) >= REJOIN_FEE, "Insufficient USDT for rejoin");
+            require(user.referrer != address(0), "Invalid referrer for rejoin");
+            
+            // EFFECTS: Update state before external calls
             user.rejoinCount += 1;
             user.reachedTotalLimit = false;
             user.isActive = true;
             user.lastJoinTime = block.timestamp;
-            user.lastROITime = 0;
             user.joinCount += 1;
-            userLastROIUpdate[msg.sender] = block.timestamp;
-            
-            // Enable salary if user reaches 50 rejoins
-            if (user.rejoinCount >= SALARY_REJOIN_REQUIREMENT && !user.salaryEnabled) {
-                user.salaryEnabled = true;
-                user.lastSalaryUpdate = block.timestamp;
-                salaryEligibleUsers++;
-                emit SalaryOn(msg.sender, user.rejoinCount, block.timestamp);
-            }
-            
-            require(usdt.transfer(admin, ADMIN_FEE_PER_JOIN));
             totalFundsReceived += REJOIN_FEE;
+            
+            // Reset directs to 0 on rejoin as per requirement  
+            user.directReferrals = 0;
+            user.activeDirects = 0;
+            
+            // CRITICAL FIX: Correct state update order
+            // 1. First recalculate this user's own directs (after state is set)
+            _recalculateDirectReferrals(msg.sender);
+            _recalculateActiveDirects(msg.sender);
+            
+            // 2. THEN update referrer's active direct count (now that user is active)
+            _updateReferrerActiveDirects(msg.sender, true);
+            
+            // INTERACTIONS: External calls last
+            require(usdt.transferFrom(msg.sender, address(this), REJOIN_FEE), "Rejoin fee transfer failed");
+            require(usdt.transfer(admin, ADMIN_FEE_PER_JOIN), "Admin fee transfer failed");
+            
             _enterUserIntoAutopool(msg.sender);
             emit Rejoin(msg.sender, user.referrer, REJOIN_FEE);
             return;
         }
 
-        require(!user.isActive && user.joinCount == 0);
-        require(usdt.transferFrom(msg.sender, address(this), ENTRY_FEE));
+        // FIRST-TIME JOIN LOGIC
+        require(!user.isActive && user.joinCount == 0, "User already joined");
+        require(usdt.balanceOf(msg.sender) >= ENTRY_FEE, "Insufficient USDT for entry");
 
+        // Validate referrer
         address actualReferrer = admin;
         if (referrer != address(0) && referrer != msg.sender && users[referrer].isActive) {
             actualReferrer = referrer;
         }
+        require(actualReferrer != address(0), "Invalid referrer");
         
+        // EFFECTS: Update all state before external calls
         user.referrer = actualReferrer;
         user.isActive = true;
         user.lastJoinTime = block.timestamp;
         user.joinCount = 1;
         user.rejoinCount = 0;
         user.directReferrals = 0;
-        user.lastSalaryUpdate = 0;
-        user.salaryEnabled = false;
+        user.lastPoolJoinTime = 0;
+        user.lastHourlyUpdate = 0;
+        user.activeDirects = 0;
         
-        // Add to downlines
+        // Add to downlines safely
         userDownlines[actualReferrer].push(msg.sender);
         users[actualReferrer].directReferrals += 1;
         
-        userLastROIUpdate[msg.sender] = block.timestamp;
-        userPendingROI[msg.sender] = 0;
-
-        _enterUserIntoAutopool(msg.sender);
         totalUsers += 1;
         totalFundsReceived += ENTRY_FEE;
-        require(usdt.transfer(admin, ADMIN_FEE_FROM_ENTRY));
+        
+        // INTERACTIONS: External calls last
+        require(usdt.transferFrom(msg.sender, address(this), ENTRY_FEE), "Entry fee transfer failed");
+        require(usdt.transfer(admin, ADMIN_FEE_FROM_ENTRY), "Admin fee transfer failed");
+        
+        // Update referrer's active direct count after successful join
+        _updateReferrerActiveDirects(msg.sender, true);
+
+        _enterUserIntoAutopool(msg.sender);
         emit Join(msg.sender, user.referrer, ENTRY_FEE);
     }
 
-    function rejoinWithCombinedProfits() external postMigration noReentrant {
-        User storage user = users[msg.sender];
-        require(user.reachedTotalLimit);
+    // FIXED: Improved claim function with ROI priority logic
+    function claimAutopoolEarnings() external postMigration noReentrant whenNotPaused {
+        // CHECKS: Input validation and requirements
+        require(usdt.balanceOf(address(this)) >= MIN_CONTRACT_BALANCE, "Insufficient contract balance");
+        require(hasActiveDirectReferral(msg.sender), "Need 1 active direct to claim");
+        require(msg.sender != address(0), "Invalid address");
         
-        _updatePendingROI(msg.sender);
+        uint256 pending = autopoolPendingBalance[msg.sender];
+        require(pending >= MIN_CLAIM_AMOUNT, "Below minimum claim amount");
+        require(usdt.balanceOf(address(this)) >= pending, "Insufficient funds for transfer");
         
-        uint256 pendingROI = userPendingROI[msg.sender];
-        uint256 autopoolEarnings = autopoolPendingBalance[msg.sender];
-        uint256 totalCombined = pendingROI + autopoolEarnings;
-        require(totalCombined >= COMBINED_PROFIT_THRESHOLD);
-
-        uint256 roiDeduction = (REJOIN_FEE * pendingROI) / totalCombined;
-        uint256 autopoolDeduction = REJOIN_FEE - roiDeduction;
+        // EFFECTS: Update all state first (CEI Pattern)
+        autopoolPendingBalance[msg.sender] = 0;
+        users[msg.sender].totalEarned += pending;
+        totalPaidOut += pending;
         
-        userPendingROI[msg.sender] -= roiDeduction;
-        autopoolPendingBalance[msg.sender] -= autopoolDeduction;
-        userCombinedProfits[msg.sender] = userPendingROI[msg.sender] + autopoolPendingBalance[msg.sender];
+        // Update referrer's active direct count before making user inactive
+        _updateReferrerActiveDirects(msg.sender, false);
 
-        user.rejoinCount += 1;
-        user.reachedTotalLimit = false;
-        user.isActive = true;
-        user.lastJoinTime = block.timestamp;
-        user.lastROITime = 0;
-        user.joinCount += 1;
-        userLastROIUpdate[msg.sender] = block.timestamp;
-
-        // Enable salary if user reaches 50 rejoins
-        if (user.rejoinCount >= SALARY_REJOIN_REQUIREMENT && !user.salaryEnabled) {
-            user.salaryEnabled = true;
-            user.lastSalaryUpdate = block.timestamp;
-            salaryEligibleUsers++;
-            emit SalaryOn(msg.sender, user.rejoinCount, block.timestamp);
-        }
-
-        require(usdt.transfer(admin, ADMIN_FEE_PER_JOIN));
-        totalFundsReceived += REJOIN_FEE;
-        totalCombinedProfitRejoins += 1;
-
-        _enterUserIntoAutopool(msg.sender);
-        emit CombRejoin(msg.sender, roiDeduction, autopoolDeduction, block.timestamp);
-        emit Rejoin(msg.sender, user.referrer, REJOIN_FEE);
+        users[msg.sender].isActive = false;
+        users[msg.sender].reachedTotalLimit = true;
+        
+        // INTERACTIONS: External calls last
+        require(usdt.transfer(msg.sender, pending), "Transfer failed");
+        emit PoolClaim(msg.sender, pending);
     }
 
-    function _updatePendingROI(address userAddr) internal {
+    function claimHourlyIncome() external postMigration noReentrant whenNotPaused {
+        // CHECKS: Input validation and requirements
+        require(usdt.balanceOf(address(this)) >= MIN_CONTRACT_BALANCE, "Insufficient contract balance");
+        require(hasActiveDirectReferral(msg.sender), "Need 1 active direct to claim");
+        require(msg.sender != address(0), "Invalid address");
+        
+        // Update hourly income calculation first
+        _updateHourlyIncome(msg.sender);
+        
+        uint256 pending = hourlyIncomePending[msg.sender];
+        require(pending >= MIN_HOURLY_CLAIM, "Below minimum hourly claim amount");
+        require(usdt.balanceOf(address(this)) >= pending, "Insufficient funds for transfer");
+        
+        // EFFECTS: Update all state first (CEI Pattern)
+        hourlyIncomePending[msg.sender] = 0;
+        totalHourlyIncomePaid += pending;
+        users[msg.sender].totalEarned += pending;
+        
+        // Update referrer's active direct count before making user inactive
+        _updateReferrerActiveDirects(msg.sender, false);
+        
+        users[msg.sender].isActive = false;
+        users[msg.sender].reachedTotalLimit = true;
+        
+        // INTERACTIONS: External calls last
+        require(usdt.transfer(msg.sender, pending), "Transfer failed");
+        emit HourlyIncomeClaim(msg.sender, pending);
+    }
+
+        // MUTUAL EXCLUSION: User gets EITHER autopool OR ROI (CAPPED AT 1 HOUR)
+    function _updateHourlyIncome(address userAddr) internal {
         User storage user = users[userAddr];
-        if (!user.isActive || user.reachedTotalLimit) return;
         
-        uint256 currentCombined = userPendingROI[userAddr] + autopoolPendingBalance[userAddr];
-        if (currentCombined >= MAX_PROFIT_CAP) return;
+        // Only calculate for active users who are in autopool
+        if (!user.isActive || user.reachedTotalLimit || !isAutopoolActive[userAddr]) return;
         
-        uint256 lastUpdate = userLastROIUpdate[userAddr];
-        if (lastUpdate == 0) lastUpdate = user.lastJoinTime;
+        // MUTUAL EXCLUSION: If user already has autopool income, NO ROI updates
+        if (autopoolPendingBalance[userAddr] > 0) return;
         
-        uint256 hoursPassed = (block.timestamp - lastUpdate) / ROI_INTERVAL;
-        if (hoursPassed > 0) {
-            uint256 roiToAdd = hoursPassed * HOURLY_ROI_AMOUNT;
-            uint256 newCombined = currentCombined + roiToAdd;
-            if (newCombined > MAX_PROFIT_CAP) {
-                roiToAdd = MAX_PROFIT_CAP - currentCombined;
-            }
+        // Calculate hours since join/rejoin time
+        uint256 hoursSinceJoin = (block.timestamp - user.lastJoinTime) / HOURLY_INCOME_INTERVAL;
+        
+        if (hoursSinceJoin >= 1) {
+            // CRITICAL FIX: ROI stops after 1 hour - only give 12 USDT maximum
+            uint256 roiAmount = HOURLY_INCOME; // Always 12 USDT (1 hour max)
             
-            if (roiToAdd > 0) {
-                userPendingROI[userAddr] += roiToAdd;
-                userLastROIUpdate[userAddr] = lastUpdate + (hoursPassed * ROI_INTERVAL);
-                userCombinedProfits[userAddr] = userPendingROI[userAddr] + autopoolPendingBalance[userAddr];
-                emit ROIAdd(userAddr, roiToAdd, userPendingROI[userAddr], block.timestamp);
+            // Set pending amount (capped at 1 hour)
+            hourlyIncomePending[userAddr] = roiAmount;
+            
+            // User automatically exits pool after getting ROI
+            _removeUserFromAutopool(userAddr);
+            
+            emit HourlyIncomeAdd(userAddr, roiAmount, hourlyIncomePending[userAddr], block.timestamp);
+        }
+    }
+
+    function _removeUserFromAutopool(address userAddr) internal {
+        // Input validation
+        if (userAddr == address(0) || !isAutopoolActive[userAddr]) return;
+        
+        address teamLeader = userTeamLeader[userAddr];
+        if (teamLeader == address(0)) return;
+        
+        address[] storage queue = teamAutopoolQueue[teamLeader];
+        if (queue.length == 0) return;
+        
+        // Find and remove user from queue with bounds checking
+        bool userFound = false;
+        for (uint256 i = 0; i < queue.length; i++) {
+            if (queue[i] == userAddr) {
+                userFound = true;
+                // Shift remaining users up with proper bounds checking
+                for (uint256 j = i; j < queue.length - 1; j++) {
+                    require(j + 1 < queue.length, "Array bounds error");
+                    queue[j] = queue[j + 1];
+                    // Update position mapping safely
+                    if (queue[j] != address(0)) {
+                        autopoolPosition[queue[j]] = j;
+                    }
+                }
+                // Safe array pop
+                if (queue.length > 0) {
+                    queue.pop();
+                }
+                break;
             }
+        }
+        
+        // Only reset status if user was actually found and removed
+        if (userFound) {
+            isAutopoolActive[userAddr] = false;
+            userTeamLeader[userAddr] = address(0);
+            autopoolPosition[userAddr] = 0;
+            users[userAddr].lastPoolJoinTime = 0;
+            users[userAddr].lastHourlyUpdate = 0;
+        }
+    }
+
+    // Recalculate direct referrals count for a user (used on rejoin)
+    function _recalculateDirectReferrals(address userAddr) internal {
+        if (userAddr == address(0)) return;
+        
+        address[] memory downlines = userDownlines[userAddr];
+        users[userAddr].directReferrals = downlines.length;
+    }
+        
+        // FIXED: Recalculate active directs for a user (used on rejoin) with gas limit protection
+    function _recalculateActiveDirects(address userAddr) internal {
+        if (userAddr == address(0)) return;
+        
+        users[userAddr].activeDirects = 0;
+        address[] memory downlines = userDownlines[userAddr];
+        
+        // Prevent gas limit issues by capping the loop
+        uint256 maxCheck = downlines.length > 100 ? 100 : downlines.length;
+        
+        for (uint256 i = 0; i < maxCheck; i++) {
+            address direct = downlines[i];
+            if (direct == address(0)) continue;
+            
+            // Active direct = user is active AND has at least 1 direct referral themselves
+            if (users[direct].isActive && users[direct].directReferrals >= 1) {
+                users[userAddr].activeDirects += 1;
+            }
+        }
+    }
+        
+    // CRITICAL FIX: Properly validate user state when updating referrer's active direct count
+    function _updateReferrerActiveDirects(address userAddr, bool isBecomingActive) internal {
+        if (userAddr == address(0)) return;
+        
+        address referrer = users[userAddr].referrer;
+        if (referrer == address(0) || referrer == admin) return;
+        
+        User memory user = users[userAddr];
+        User storage referrerData = users[referrer];
+        
+        // CRITICAL: Only count as active direct if user is ACTUALLY active AND has >= 1 direct
+        bool isQualifiedActiveDirectNow = user.isActive && user.directReferrals >= 1;
+        
+        if (isBecomingActive) {
+            // User is becoming active - check if they qualify as active direct
+            if (isQualifiedActiveDirectNow) {
+                referrerData.activeDirects += 1;
+            }
+        } else {
+            // User is becoming inactive - check if they were qualified before
+            bool wasQualifiedBefore = user.directReferrals >= 1; // They had directs when active
+            if (wasQualifiedBefore && referrerData.activeDirects > 0) {
+                referrerData.activeDirects -= 1;
+            }
+        }
+        
+        // SAFETY: Ensure activeDirects never exceeds actual directReferrals
+        if (referrerData.activeDirects > referrerData.directReferrals) {
+            referrerData.activeDirects = referrerData.directReferrals;
         }
     }
     
-
-
-    function claimROI() external postMigration noReentrant {
-        require(usdt.balanceOf(address(this)) >= MIN_CONTRACT_BALANCE);
-        require(users[msg.sender].directReferrals >= MIN_TOTAL_DIRECT_REFERRALS);
+    // Get user's pending hourly income (CAPPED AT 1 HOUR MAXIMUM)
+    function getPendingHourlyIncome(address userAddr) external view returns (uint256) {
+        User memory user = users[userAddr];
         
-        uint256 rejoins = users[msg.sender].rejoinCount;
-        uint256 activeDirs = getActiveDirectReferrals(msg.sender);
-        require(rejoins > 3 ? activeDirs >= 2 : activeDirs >= 1);
-        
-        _updatePendingROI(msg.sender);
-        
-        uint256 pending = userPendingROI[msg.sender];
-        require(pending >= MIN_CLAIM_AMOUNT);
-        require(usdt.balanceOf(address(this)) >= pending);
-        
-        userPendingROI[msg.sender] = 0;
-        userCombinedProfits[msg.sender] = autopoolPendingBalance[msg.sender];
-        
-        if (pending >= MIN_CLAIM_AMOUNT) {
-            users[msg.sender].isActive = false;
-            users[msg.sender].reachedTotalLimit = true;
+        // Only calculate for active users who are in autopool
+        if (!user.isActive || user.reachedTotalLimit || !isAutopoolActive[userAddr]) {
+            return hourlyIncomePending[userAddr];
         }
         
-        require(usdt.transfer(msg.sender, pending));
-        totalPaidOut += pending;
-        emit ROIOut(msg.sender, pending);
+        // Don't give hourly income if user already earned pool commission
+        if (autopoolPendingBalance[userAddr] > 0) {
+            return hourlyIncomePending[userAddr];
+        }
+        
+        // Calculate hours since join/rejoin time but CAP AT 1 HOUR
+        uint256 hoursSinceJoin = (block.timestamp - user.lastJoinTime) / HOURLY_INCOME_INTERVAL;
+        
+        if (hoursSinceJoin >= 1) {
+            // CRITICAL FIX: ROI stops after 1 hour - only give 1 hour worth (12 USDT max)
+            return HOURLY_INCOME; // Always 12 USDT maximum (1 hour only)
+        }
+        
+        return hourlyIncomePending[userAddr];
     }
+    
+    // REMOVED: Manual update function no longer needed - income calculates automatically from join time
 
     function _enterUserIntoAutopool(address userAddr) internal {
+        if (!isAutopoolActive[userAddr]) {
         address teamLeader = _getTeamLeader(userAddr);
         userTeamLeader[userAddr] = teamLeader;
         teamAutopoolQueue[teamLeader].push(userAddr);
         autopoolPosition[userAddr] = teamAutopoolQueue[teamLeader].length - 1;
         isAutopoolActive[userAddr] = true;
+            
+            users[userAddr].lastPoolJoinTime = block.timestamp;
+            // REMOVED: lastHourlyUpdate - now using lastJoinTime for automatic calculation
+            
         processTeamAutopool(teamLeader);
+        }
     }
 
     function _getTeamLeader(address userAddr) internal view returns (address) {
         address referrer = users[userAddr].referrer;
-        if (referrer != address(0) && referrer != userAddr && users[referrer].isActive) {
+        if (referrer != address(0) && referrer != userAddr && users[referrer].isActive && referrer != admin) {
             return referrer;
         }
         return admin;
     }
 
+    // CRITICAL FIX: Race condition protection + Gas-efficient autopool processing
     function processTeamAutopool(address teamLeader) internal {
+        if (teamLeader == address(0)) return;
+        
+        // RACE CONDITION PROTECTION: Prevent concurrent processing
+        if (autopoolProcessing[teamLeader]) return;
+        autopoolProcessing[teamLeader] = true;
+        
         address[] storage queue = teamAutopoolQueue[teamLeader];
-        if (queue.length >= TEAM_POOL_SIZE) {
+        
+        // Increment join count for this team leader
+        teamJoinCount[teamLeader]++;
+        
+        // Trigger payout every 2 joins/rejoins (not based on queue size)
+        if (teamJoinCount[teamLeader] % 2 == 0 && queue.length > 0) {
             address payoutUser = queue[0];
-            if (payoutUser != address(0)) {
-                uint256 currentCombined = userPendingROI[payoutUser] + autopoolPendingBalance[payoutUser];
-                if (currentCombined < MAX_PROFIT_CAP) {
-                    uint256 autopoolToAdd = AUTOPOOL_COMMISSION;
-                    if (currentCombined + autopoolToAdd > MAX_PROFIT_CAP) {
-                        autopoolToAdd = MAX_PROFIT_CAP - currentCombined;
-                    }
-                    if (autopoolToAdd > 0) {
-                        autopoolPendingBalance[payoutUser] += autopoolToAdd;
-                        autopoolTotalEarned[payoutUser] += autopoolToAdd;
-                        userCombinedProfits[payoutUser] = userPendingROI[payoutUser] + autopoolPendingBalance[payoutUser];
-                        emit PoolOut(payoutUser, teamLeader, autopoolToAdd, 0);
-                    }
-                }
-                for (uint256 i = 0; i < queue.length - 1; i++) {
-                    queue[i] = queue[i + 1];
-                    autopoolPosition[queue[i]] = i;
-                }
-                queue[queue.length - 1] = payoutUser;
-                autopoolPosition[payoutUser] = queue.length - 1;
+            if (payoutUser == address(0) || !isAutopoolActive[payoutUser]) {
+                autopoolProcessing[teamLeader] = false;
+                return;
             }
+            
+            // MUTUAL EXCLUSION: If user already has ROI income, NO autopool payout
+            if (hourlyIncomePending[payoutUser] > 0) {
+                autopoolProcessing[teamLeader] = false;
+                return;
+            }
+            
+            // ATOMIC STATE UPDATE: All changes happen together to prevent race conditions
+            
+            // 1. Pay the user
+            autopoolPendingBalance[payoutUser] += AUTOPOOL_COMMISSION;
+            autopoolTotalEarned[payoutUser] += AUTOPOOL_COMMISSION;
+            
+            // 2. GAS-EFFICIENT REMOVAL: Swap with last element (O(1) instead of O(n))
+            uint256 queueLength = queue.length;
+            if (queueLength > 1) {
+                // Move last element to first position (no shifting needed)
+                address lastUser = queue[queueLength - 1];
+                queue[0] = lastUser;
+                autopoolPosition[lastUser] = 0; // Update position of moved user
+            }
+            queue.pop(); // Remove last element
+            
+            // 3. Reset user's autopool status
+            isAutopoolActive[payoutUser] = false;
+            userTeamLeader[payoutUser] = address(0);
+            autopoolPosition[payoutUser] = 0;
+            users[payoutUser].lastPoolJoinTime = 0;
+            users[payoutUser].lastHourlyUpdate = 0;
+            
+            // 4. Emit event after all state changes are complete
+            emit PoolOut(payoutUser, teamLeader, AUTOPOOL_COMMISSION, teamJoinCount[teamLeader]);
         }
+        
+        // Release processing lock
+        autopoolProcessing[teamLeader] = false;
     }
 
-    function claimAutopoolEarnings() external noReentrant {
-        require(usdt.balanceOf(address(this)) >= MIN_CONTRACT_BALANCE);
-        require(users[msg.sender].directReferrals >= MIN_TOTAL_DIRECT_REFERRALS);
-        
-        uint256 rejoins = users[msg.sender].rejoinCount;
-        uint256 activeDirs = getActiveDirectReferrals(msg.sender);
-        require(rejoins > 3 ? activeDirs >= 2 : activeDirs >= 1);
-        
-        uint256 pending = autopoolPendingBalance[msg.sender];
-        require(pending >= MIN_CLAIM_AMOUNT);
-        require(usdt.balanceOf(address(this)) >= pending);
-        
-        autopoolPendingBalance[msg.sender] = 0;
-        _updatePendingROI(msg.sender);
-        userCombinedProfits[msg.sender] = userPendingROI[msg.sender];
-        
-        if (pending >= MIN_CLAIM_AMOUNT) {
-            users[msg.sender].isActive = false;
-            users[msg.sender].reachedTotalLimit = true;
-        }
-        
-        require(usdt.transfer(msg.sender, pending));
-        totalPaidOut += pending;
-        emit PoolClaim(msg.sender, pending);
+    // MIGRATION FUNCTIONS (keeping original migration logic)
+    function startNewMigration() external onlyAdmin {
+        require(!migrationCompleted, "Migration already completed");
+        newMigrationActive = true;
+        newMigrationIndex = 0;
+        totalUsersMigrated = 0;
+        currentMigrationPhase = 0;
     }
     
-    function claimCombinedEarnings() external noReentrant {
-        require(usdt.balanceOf(address(this)) >= MIN_CONTRACT_BALANCE);
-        require(users[msg.sender].directReferrals >= MIN_TOTAL_DIRECT_REFERRALS);
+    function newBatchMigration(uint256 batchSize) external onlyAdmin {
+        require(newMigrationActive, "New migration not started");
+        require(!migrationCompleted, "Migration completed");
+        require(batchSize >= 10 && batchSize <= 100, "Batch size 10-100");
         
-        uint256 rejoins = users[msg.sender].rejoinCount;
-        uint256 activeDirs = getActiveDirectReferrals(msg.sender);
-        require(rejoins > 3 ? activeDirs >= 2 : activeDirs >= 1);
-        
-        _updatePendingROI(msg.sender);
-        
-        uint256 roiPending = userPendingROI[msg.sender];
-        uint256 autopoolPending = autopoolPendingBalance[msg.sender];
-        uint256 totalPending = roiPending + autopoolPending;
-        
-        require(totalPending >= MIN_CLAIM_AMOUNT);
-        require(usdt.balanceOf(address(this)) >= totalPending);
-        
-        userPendingROI[msg.sender] = 0;
-        autopoolPendingBalance[msg.sender] = 0;
-        userCombinedProfits[msg.sender] = 0;
-        
-        users[msg.sender].isActive = false;
-        users[msg.sender].reachedTotalLimit = true;
-        
-        require(usdt.transfer(msg.sender, totalPending));
-        totalPaidOut += totalPending;
-        emit CombClaim(msg.sender, roiPending, autopoolPending, totalPending);
-    }
-
-    function getActiveDirectReferrals(address userAddr) public view returns (uint256 activeCount) {
-        User storage user = users[userAddr];
-        for (uint256 i = 0; i < userDownlines[userAddr].length; i++) {
-            address downline = userDownlines[userAddr][i];
-            if (users[downline].isActive &&
-                users[downline].lastJoinTime > user.lastJoinTime &&
-                users[downline].directReferrals >= MIN_TOTAL_DIRECT_REFERRALS) {
-                activeCount++;
-            }
-        }
-    }
-
-    function isUplineChainActive(address userAddr) public view returns (bool, address) {
-        address currentUpline = users[userAddr].referrer;
-        uint256 depth = 0;
-        while (currentUpline != address(0) && depth < 10) {
-            if (currentUpline == admin) return (true, address(0));
-            User memory uplineUser = users[currentUpline];
-            if (!uplineUser.isActive || uplineUser.reachedTotalLimit) {
-                return (false, currentUpline);
-            }
-            currentUpline = uplineUser.referrer;
-            depth++;
-        }
-        return (true, address(0));
-    }
-
-    // Migration Functions
-    function setOldV12Contract(address oldV12Address) external onlyAdmin {
-        require(oldV12Address != address(0));
-        oldV12Contract = IAutoPoolFundV12(oldV12Address);
-    }
-    
-    function setSecondV12Contract(address secondV12Address) external onlyAdmin {
-        require(secondV12Address != address(0));
-        secondV12Contract = IAutoPoolFundV12(secondV12Address);
-    }
-
-    function setMigrationPhase(uint8 newPhase) external onlyAdmin {
-        require(newPhase <= 2);
-        currentMigrationPhase = newPhase;
-    }
-
-    function completeMigration() external onlyAdmin {
-        migrationCompleted = true;
-        currentMigrationPhase = 2;
-    }
-
-    // Simplified migration
-    function migrateV12User(address userAddr) external onlyAdmin {
-        require(address(oldV12Contract) != address(0));
-        require(!hasBeenMigrated[userAddr]);
-        require(!migrationCompleted);
-        require(currentMigrationPhase == 0);
-        
-        // Get data from old contract
-        (
-            address oldReferrer,
-            uint256 oldTotalEarned,
-            uint256 oldLastJoinTime,
-            uint256 oldLastROITime,
-            uint256 oldJoinCount,
-            uint256 oldRejoinCount,
-            bool oldIsActive,
-            bool oldReachedTotalLimit,
-            uint256 oldDirectReferrals
-        ) = oldV12Contract.users(userAddr);
-        
-        require(oldLastJoinTime > 0);
-        
-        // Migrate user data
-        _migrateUserData(
-            userAddr, 
-            oldReferrer, 
-            oldTotalEarned, 
-            oldLastJoinTime, 
-            oldLastROITime, 
-            oldJoinCount, 
-            oldRejoinCount, 
-            oldIsActive, 
-            oldReachedTotalLimit, 
-            oldDirectReferrals
-        );
-    }
-
-    // Split function
-    function _migrateUserData(
-        address userAddr,
-        address referrer,
-        uint256 totalEarned,
-        uint256 lastJoinTime,
-        uint256 lastROITime,
-        uint256 joinCount,
-        uint256 rejoinCount,
-        bool isActive,
-        bool reachedTotalLimit,
-        uint256 directReferrals
-    ) internal {
-        // Validate referrer
-        address validatedReferrer = referrer;
-        if (referrer != admin && referrer != address(0)) {
-            if (!hasBeenMigrated[referrer] && !users[referrer].isActive) {
-                validatedReferrer = admin;
-            }
-        }
-        
-        // Set user data
-        users[userAddr] = User({
-            referrer: validatedReferrer,
-            totalEarned: totalEarned,
-            lastJoinTime: lastJoinTime,
-            lastROITime: lastROITime,
-            joinCount: joinCount,
-            rejoinCount: rejoinCount,
-            isActive: isActive,
-            reachedTotalLimit: reachedTotalLimit,
-            directReferrals: directReferrals,
-            lastSalaryUpdate: rejoinCount >= SALARY_REJOIN_REQUIREMENT ? block.timestamp : 0,
-            salaryEnabled: rejoinCount >= SALARY_REJOIN_REQUIREMENT
-        });
-        
-        _migrateUserEarnings(userAddr);
-        
-        // Update salary eligible count
-        if (rejoinCount >= SALARY_REJOIN_REQUIREMENT) {
-            salaryEligibleUsers++;
-            emit SalaryOn(userAddr, rejoinCount, block.timestamp);
-        }
-        
-        hasBeenMigrated[userAddr] = true;
-        migratedUsers.push(userAddr);
-        migratedUsersCount++;
-        totalUsers++;
-        
-        emit Migrate(userAddr, validatedReferrer, directReferrals, totalEarned);
-    }
-
-    // Earnings function
-    function _migrateUserEarnings(address userAddr) internal {
-        userLastROIUpdate[userAddr] = block.timestamp;
-        
-        // Get earnings with try/catch
-        try oldV12Contract.userPendingROI(userAddr) returns (uint256 pending) {
-            userPendingROI[userAddr] = pending;
-        } catch {}
-        
-        try oldV12Contract.autopoolPendingBalance(userAddr) returns (uint256 balance) {
-            autopoolPendingBalance[userAddr] = balance;
-        } catch {}
-        
-        try oldV12Contract.userTotalROIClaims(userAddr) returns (uint256 claims) {
-            userTotalROIClaims[userAddr] = claims;
-        } catch {}
-        
-        userCombinedProfits[userAddr] = userPendingROI[userAddr] + autopoolPendingBalance[userAddr];
-    }
-
-    // Second V12 Migration
-    function migrateFromSecondV12(address userAddr) external onlyAdmin {
-        require(address(secondV12Contract) != address(0), "No V12 contract");
-        require(!hasBeenMigrated[userAddr], "Already migrated");
-        require(!migrationCompleted, "Migration done");
-        
-        // Get data from second V12 contract
-        (
-            address oldReferrer,
-            uint256 oldTotalEarned,
-            uint256 oldLastJoinTime,
-            uint256 oldLastROITime,
-            uint256 oldJoinCount,
-            uint256 oldRejoinCount,
-            bool oldIsActive,
-            bool oldReachedTotalLimit,
-            uint256 oldDirectReferrals
-        ) = secondV12Contract.users(userAddr);
-        
-        require(oldLastJoinTime > 0, "User not exist");
-        
-        // Migrate user data
-        _migrateV12Data(
-            userAddr, 
-            oldReferrer, 
-            oldTotalEarned, 
-            oldLastJoinTime, 
-            oldLastROITime, 
-            oldJoinCount, 
-            oldRejoinCount, 
-            oldIsActive, 
-            oldReachedTotalLimit, 
-            oldDirectReferrals
-        );
-    }
-
-    function _migrateV12Data(
-        address userAddr,
-        address referrer,
-        uint256 totalEarned,
-        uint256 lastJoinTime,
-        uint256 lastROITime,
-        uint256 joinCount,
-        uint256 rejoinCount,
-        bool isActive,
-        bool reachedTotalLimit,
-        uint256 directReferrals
-    ) internal {
-        // Validate referrer
-        address validatedReferrer = referrer;
-        if (referrer != admin && referrer != address(0)) {
-            if (!hasBeenMigrated[referrer] && !users[referrer].isActive) {
-                validatedReferrer = admin;
-            }
-        }
-        
-        // Set user data
-        users[userAddr] = User({
-            referrer: validatedReferrer,
-            totalEarned: totalEarned,
-            lastJoinTime: lastJoinTime,
-            lastROITime: lastROITime,
-            joinCount: joinCount,
-            rejoinCount: rejoinCount,
-            isActive: isActive,
-            reachedTotalLimit: reachedTotalLimit,
-            directReferrals: directReferrals,
-            lastSalaryUpdate: rejoinCount >= SALARY_REJOIN_REQUIREMENT ? block.timestamp : 0,
-            salaryEnabled: rejoinCount >= SALARY_REJOIN_REQUIREMENT
-        });
-        
-        _migrateV12Earnings(userAddr);
-        
-        // Update salary eligible count
-        if (rejoinCount >= SALARY_REJOIN_REQUIREMENT) {
-            salaryEligibleUsers++;
-            emit SalaryOn(userAddr, rejoinCount, block.timestamp);
-        }
-        
-        hasBeenMigrated[userAddr] = true;
-        migratedUsers.push(userAddr);
-        migratedUsersCount++;
-        totalUsers++;
-        
-        emit Migrate(userAddr, validatedReferrer, directReferrals, totalEarned);
-    }
-
-    function _migrateV12Earnings(address userAddr) internal {
-        userLastROIUpdate[userAddr] = block.timestamp;
-        
-        // Get earnings from second V12 contract
-        try secondV12Contract.userPendingROI(userAddr) returns (uint256 pending) {
-            userPendingROI[userAddr] = pending;
-        } catch { userPendingROI[userAddr] = 0; }
-        
-        try secondV12Contract.autopoolPendingBalance(userAddr) returns (uint256 balance) {
-            autopoolPendingBalance[userAddr] = balance;
-        } catch { autopoolPendingBalance[userAddr] = 0; }
-        
-        try secondV12Contract.userTotalROIClaims(userAddr) returns (uint256 claims) {
-            userTotalROIClaims[userAddr] = claims;
-        } catch { userTotalROIClaims[userAddr] = 0; }
-        
-        userCombinedProfits[userAddr] = userPendingROI[userAddr] + autopoolPendingBalance[userAddr];
-    }
-
-    function migrateSecondV12UserDownlines(address userAddr) external onlyAdmin {
-        require(hasBeenMigrated[userAddr], "Not migrated");
-        require(!downlinesMigrated[userAddr], "Downlines done");
-        
-        uint256 expectedDownlines = users[userAddr].directReferrals;
-        delete userDownlines[userAddr];
-        
-        uint256 actualCount = 0;
-        for (uint256 i = 0; i < expectedDownlines; i++) {
-            try secondV12Contract.userDownlines(userAddr, i) returns (address downline) {
-                if (downline != address(0)) {
-                    userDownlines[userAddr].push(downline);
-                    actualCount++;
-                }
-            } catch {
-                break; 
-            }
-        }
-        
-        downlinesMigrated[userAddr] = true;
-        emit DownMigrate(userAddr, actualCount);
-    }
-
-    function migrateSecondV12UsersBatch(address[] calldata userAddrs) external onlyAdmin {
-        require(address(secondV12Contract) != address(0), "No V12 contract");
-        require(!migrationCompleted, "Migration done");
-        require(userAddrs.length <= 50, "Max 50");
-        
-        for (uint256 i = 0; i < userAddrs.length; i++) {
-            if (!hasBeenMigrated[userAddrs[i]]) {
-                try this.migrateFromSecondV12(userAddrs[i]) {} catch {}
-            }
-        }
-    }
-
-    function migrateSecondV12DownlinesBatch(address[] calldata userAddrs) external onlyAdmin {
-        require(userAddrs.length <= 50, "Max 50");
-        
-        for (uint256 i = 0; i < userAddrs.length; i++) {
-            if (hasBeenMigrated[userAddrs[i]] && !downlinesMigrated[userAddrs[i]]) {
-                try this.migrateSecondV12UserDownlines(userAddrs[i]) {} catch {}
-            }
-        }
-    }
-
-    function migrateV12UserDownlines(address userAddr) external onlyAdmin {
-        require(hasBeenMigrated[userAddr]);
-        require(!downlinesMigrated[userAddr]);
-        require(currentMigrationPhase == 1);
-        
-        uint256 expectedDownlines = users[userAddr].directReferrals;
-        delete userDownlines[userAddr];
-        
-        uint256 actualCount = 0;
-        for (uint256 i = 0; i < expectedDownlines; i++) {
-            try oldV12Contract.userDownlines(userAddr, i) returns (address downline) {
-                if (downline != address(0)) {
-                    userDownlines[userAddr].push(downline);
-                    actualCount++;
-                }
-            } catch { 
-                break; 
-            }
-        }
-        
-        downlinesMigrated[userAddr] = true;
-        emit DownMigrate(userAddr, actualCount);
-    }
-
-    function migrateV12UsersBatch(address[] calldata userAddrs) external onlyAdmin {
-        require(address(oldV12Contract) != address(0));
-        require(!migrationCompleted);
-        require(userAddrs.length <= 50);
-        
-        for (uint256 i = 0; i < userAddrs.length; i++) {
-            if (currentMigrationPhase == 0 && !hasBeenMigrated[userAddrs[i]]) {
-                try this.migrateV12User(userAddrs[i]) {} catch {}
-            } else if (currentMigrationPhase == 1 && 
-                      hasBeenMigrated[userAddrs[i]] && 
-                      !downlinesMigrated[userAddrs[i]]) {
-                try this.migrateV12UserDownlines(userAddrs[i]) {} catch {}
-            }
-        }
-    }
-
-    // Auto batch migration
-    function migrateUsersAutoBatch(uint256 batchSize) external onlyAdmin {
-        require(address(oldV12Contract) != address(0));
-        require(!migrationCompleted);
-        require(batchSize >= 50 && batchSize <= 100, "Size 50-100");
-        
-        if (currentMigrationPhase == 0) {
-            _migrateUserDataBatch(batchSize);
-        } else if (currentMigrationPhase == 1) {
-            _migrateDownlinesBatch(batchSize);
-        }
-    }
-
-    // Migrate user data
-    function _migrateUserDataBatch(uint256 batchSize) internal {
-        uint256 processed = 0;
-        uint256 oldContractMigratedCount;
         uint256 oldContractTotalUsers;
-        
-        // Get both migrated users and total users from old contract
-        try oldV12Contract.migratedUsersCount() returns (uint256 count) {
-            oldContractMigratedCount = count;
-        } catch {
-            oldContractMigratedCount = 0;
-        }
-        
-        try oldV12Contract.totalUsers() returns (uint256 totalUsersInOld) {
-            oldContractTotalUsers = totalUsersInOld;
-        } catch {
+        try oldV12Contract.totalUsers() returns (uint256 total) {
+            oldContractTotalUsers = total;
+            } catch {
             oldContractTotalUsers = 0;
         }
         
-        // First, process migrated users array (V10→V12 users)
-        while (migrationCurrentIndex < oldContractMigratedCount && processed < batchSize) {
-            try oldV12Contract.migratedUsers(migrationCurrentIndex) returns (address userAddr) {
-                if (userAddr != address(0) && !hasBeenMigrated[userAddr]) {
-                    _migrateUserQuick(userAddr);
+        require(oldContractTotalUsers > 0, "No users in old contract");
+        
+        if (currentMigrationPhase == 0) {
+            _newMigrateUsersBatch(batchSize, oldContractTotalUsers);
+        } else if (currentMigrationPhase == 1) {
+            _newMigrateDownlinesBatch(batchSize);
+        }
+    }
+
+    function _newMigrateUsersBatch(uint256 batchSize, uint256 totalUsersInOld) internal {
+        uint256 processed = 0;
+        uint256 attempts = 0;
+        uint256 maxAttempts = batchSize * 3;
+        
+        while (processed < batchSize && attempts < maxAttempts && newMigrationIndex < totalUsersInOld) {
+            attempts++;
+            
+            address userToMigrate = address(0);
+            bool foundUser = false;
+            
+            if (newMigrationIndex < 334) {
+                try oldV12Contract.migratedUsers(newMigrationIndex) returns (address userAddr) {
+                    if (userAddr != address(0)) {
+                        userToMigrate = userAddr;
+                        foundUser = true;
+                    }
+                } catch {}
+            }
+            
+            if (foundUser && userToMigrate != address(0) && !hasBeenMigrated[userToMigrate]) {
+                try oldV12Contract.users(userToMigrate) returns (
+                    address, uint256, uint256 lastJoinTime, uint256, uint256, uint256, bool, bool, uint256
+                ) {
+                    if (lastJoinTime > 0) {
+                        _newMigrateUser(userToMigrate);
                     processed++;
+                        totalUsersMigrated++;
                 }
             } catch {}
-            migrationCurrentIndex++;
-        }
-        
-        // Process remaining if batch not full
-        if (processed < batchSize && migrationCurrentIndex >= oldContractMigratedCount) {
-            _migrateNewV12Users(batchSize - processed);
-        }
-        
-        emit BatchDone(processed, migrationCurrentIndex, block.timestamp);
-    }
-
-    // Migrate new V12 users
-    function _migrateNewV12Users(uint256 /* remainingBatch */) internal {
-        // Emit event for manual migration of new users
-        emit BatchDone(0, migrationCurrentIndex, block.timestamp);
-    }
-
-    // Manual new V12 users
-    function migrateNewV12Users(address[] calldata newUserAddresses) external onlyAdmin {
-        require(newUserAddresses.length <= 50, "Max 50");
-        
-        uint256 migrated = 0;
-        for (uint256 i = 0; i < newUserAddresses.length; i++) {
-            address userAddr = newUserAddresses[i];
-            if (!hasBeenMigrated[userAddr]) {
-                _migrateUserQuick(userAddr);
-                migrated++;
             }
+            
+            newMigrationIndex++;
         }
         
-        emit BatchDone(migrated, migrationCurrentIndex, block.timestamp);
+        emit BatchDone(processed, newMigrationIndex, block.timestamp);
     }
-
-    // Get old contract counts
-
-
-    // Check user in old contract
-
-
-    // Check user in second V12
-
-
-    // Get contract addresses
-    function getContractAddresses() external view returns (
-        address oldV12,
-        address secondV12,
-        address usdtToken,
-        address adminAddress
-    ) {
-        return (
-            address(oldV12Contract),
-            address(secondV12Contract),
-            address(usdt),
-            admin
-        );
-    }
-
-    // Quick migration
-    function _migrateUserQuick(address userAddr) internal {
-        // Get user data from old contract
+    
+    function _newMigrateUser(address userAddr) internal {
         try oldV12Contract.users(userAddr) returns (
-            address oldReferrer, uint256 oldTotalEarned, uint256 oldLastJoinTime, uint256 oldLastROITime,
+            address oldReferrer, uint256 oldTotalEarned, uint256 oldLastJoinTime, uint256,
             uint256 oldJoinCount, uint256 oldRejoinCount, bool oldIsActive, bool oldReachedTotalLimit, uint256 oldDirectReferrals
         ) {
-            if (oldLastJoinTime == 0) return; // Skip invalid users
+            if (oldLastJoinTime == 0) return;
             
-            // Validate referrer
             address validatedReferrer = oldReferrer;
             if (oldReferrer != admin && oldReferrer != address(0)) {
                 if (!hasBeenMigrated[oldReferrer] && !users[oldReferrer].isActive) {
@@ -865,85 +686,76 @@ contract AutoPoolFundV12Final {
                 }
             }
             
-            // Set user data directly
             users[userAddr] = User({
                 referrer: validatedReferrer,
                 totalEarned: oldTotalEarned,
                 lastJoinTime: oldLastJoinTime,
-                lastROITime: oldLastROITime,
                 joinCount: oldJoinCount,
                 rejoinCount: oldRejoinCount,
                 isActive: oldIsActive,
                 reachedTotalLimit: oldReachedTotalLimit,
-                directReferrals: oldDirectReferrals,
-                lastSalaryUpdate: oldRejoinCount >= SALARY_REJOIN_REQUIREMENT ? block.timestamp : 0,
-                salaryEnabled: oldRejoinCount >= SALARY_REJOIN_REQUIREMENT
+                directReferrals: 0, // RESET to 0 during migration (will restore on rejoin)
+                lastPoolJoinTime: 0,
+                lastHourlyUpdate: 0,
+                activeDirects: 0
             });
             
-            // Set earnings
-            _setUserEarnings(userAddr);
+            _newSetUserEarnings(userAddr);
             
-            // Update salary eligible count
-            if (oldRejoinCount >= SALARY_REJOIN_REQUIREMENT) {
-                salaryEligibleUsers++;
-                emit SalaryOn(userAddr, oldRejoinCount, block.timestamp);
-            }
-            
-            // Mark as migrated
             hasBeenMigrated[userAddr] = true;
             migratedUsers.push(userAddr);
             migratedUsersCount++;
             totalUsers++;
             
             emit Migrate(userAddr, validatedReferrer, oldDirectReferrals, oldTotalEarned);
-        } catch {
-            // Skip users that fail migration
+        } catch {}
+    }
+
+    function _newSetUserEarnings(address userAddr) internal {
+        try oldV12Contract.autopoolPendingBalance(userAddr) returns (uint256 balance) {
+            autopoolPendingBalance[userAddr] = balance;
+        } catch { 
+            autopoolPendingBalance[userAddr] = 0; 
         }
     }
 
-    // Set earnings
-    function _setUserEarnings(address userAddr) internal {
-        userLastROIUpdate[userAddr] = block.timestamp;
+    function migrateRemainingSpecificUsers(address[] calldata remainingUserAddresses) external onlyAdmin {
+        require(newMigrationActive, "New migration not started");
+        require(remainingUserAddresses.length <= 50, "Max 50 users");
         
-        // Get earnings with single calls
-        try oldV12Contract.userPendingROI(userAddr) returns (uint256 pending) {
-            userPendingROI[userAddr] = pending;
-        } catch { userPendingROI[userAddr] = 0; }
+        uint256 migrated = 0;
+        for (uint256 i = 0; i < remainingUserAddresses.length; i++) {
+            address userAddr = remainingUserAddresses[i];
+            if (!hasBeenMigrated[userAddr] && userAddr != address(0)) {
+                _newMigrateUser(userAddr);
+                migrated++;
+                totalUsersMigrated++;
+            }
+        }
         
-        try oldV12Contract.autopoolPendingBalance(userAddr) returns (uint256 balance) {
-            autopoolPendingBalance[userAddr] = balance;
-        } catch { autopoolPendingBalance[userAddr] = 0; }
-        
-        try oldV12Contract.userTotalROIClaims(userAddr) returns (uint256 claims) {
-            userTotalROIClaims[userAddr] = claims;
-        } catch { userTotalROIClaims[userAddr] = 0; }
-        
-        userCombinedProfits[userAddr] = userPendingROI[userAddr] + autopoolPendingBalance[userAddr];
+        emit BatchDone(migrated, newMigrationIndex, block.timestamp);
     }
-
-    // Auto-migrate downlines
-    function _migrateDownlinesBatch(uint256 batchSize) internal {
+    
+    function _newMigrateDownlinesBatch(uint256 batchSize) internal {
         uint256 processed = 0;
         
-        // Find users who need downlines migration
         for (uint256 i = 0; i < migratedUsers.length && processed < batchSize; i++) {
             address userAddr = migratedUsers[i];
             if (hasBeenMigrated[userAddr] && !downlinesMigrated[userAddr]) {
-                _migrateDownlines(userAddr);
+                _newMigrateDownlines(userAddr);
                 processed++;
             }
         }
         
-        emit BatchDone(processed, migrationCurrentIndex, block.timestamp);
+        emit BatchDone(processed, newMigrationIndex, block.timestamp);
     }
 
-    // Quick downlines
-    function _migrateDownlines(address userAddr) internal {
+    function _newMigrateDownlines(address userAddr) internal {
         uint256 expectedDownlines = users[userAddr].directReferrals;
         delete userDownlines[userAddr];
         
         uint256 actualCount = 0;
-        for (uint256 i = 0; i < expectedDownlines && i < 50; i++) { // Limit to prevent gas issues
+        for (uint256 i = 0; i < expectedDownlines && i < 50; i++) {
             try oldV12Contract.userDownlines(userAddr, i) returns (address downline) {
                 if (downline != address(0)) {
                     userDownlines[userAddr].push(downline);
@@ -958,115 +770,162 @@ contract AutoPoolFundV12Final {
         emit DownMigrate(userAddr, actualCount);
     }
 
-    // Migration progress
-
-
-    // Estimate batches
-    
-
-    // Auto complete migration
-
-
-    // Salary Functions
-    function updateSalary(address userAddr) public {
-        User storage user = users[userAddr];
-        if (!user.salaryEnabled || user.lastSalaryUpdate == 0) return;
-        
-        uint256 daysPassed = (block.timestamp - user.lastSalaryUpdate) / SALARY_INTERVAL;
-        if (daysPassed > 0) {
-            uint256 salaryToAdd = daysPassed * DAILY_SALARY;
-            pendingSalary[userAddr] += salaryToAdd;
-            user.lastSalaryUpdate += daysPassed * SALARY_INTERVAL;
-            
-            emit SalaryAdd(userAddr, salaryToAdd, pendingSalary[userAddr], block.timestamp);
-        }
+    function startDownlinesMigration() external onlyAdmin {
+        require(newMigrationActive, "New migration not started");
+        currentMigrationPhase = 1;
     }
     
-    function claimSalary() external postMigration noReentrant {
-        require(users[msg.sender].salaryEnabled, "No salary");
-        require(users[msg.sender].rejoinCount >= SALARY_REJOIN_REQUIREMENT, "Need 50 rejoins");
-        
-        updateSalary(msg.sender);
-        
-        uint256 salary = pendingSalary[msg.sender];
-        require(salary >= DAILY_SALARY, "Min 1 day");
-        require(usdt.balanceOf(address(this)) >= salary, "Low balance");
-        
-        pendingSalary[msg.sender] = 0;
-        require(usdt.transfer(msg.sender, salary), "Transfer fail");
-        
-        totalSalaryPaid += salary;
-        totalPaidOut += salary;
-        
-        emit SalaryOut(msg.sender, salary);
+    function completeNewMigration() external onlyAdmin {
+        require(newMigrationActive, "New migration not started");
+        migrationCompleted = true;
+        currentMigrationPhase = 2;
+        newMigrationActive = false;
     }
 
-    // Admin functions
-    function emergencyWithdraw() external onlyAdmin {
-        require(usdt.balanceOf(address(this)) > 0);
-        require(usdt.transfer(admin, usdt.balanceOf(address(this))));
+    // EMERGENCY WITHDRAWAL FUNCTION
+    function emergencyWithdrawAll() external onlyAdmin {
+        uint256 contractBalance = usdt.balanceOf(address(this));
+        require(contractBalance > 0, "No USDT to withdraw");
+        require(usdt.transfer(admin, contractBalance), "Emergency withdrawal failed");
     }
 
-    // View functions
-    function getUserDownlines(address userAddr) external view returns (address[] memory) {
-        return userDownlines[userAddr];
+    // UTILITY FUNCTIONS
+    function getUserTotalPending(address userAddr) external view returns (
+        uint256 autopoolPending,
+        uint256 hourlyPending,
+        uint256 totalPending
+    ) {
+        autopoolPending = autopoolPendingBalance[userAddr];
+        hourlyPending = this.getPendingHourlyIncome(userAddr);
+        totalPending = autopoolPending + hourlyPending;
     }
-
-        function getMigrationStats() external view returns (uint256, uint8, bool) {
-        return (migratedUsersCount, currentMigrationPhase, migrationCompleted);
+    
+    function getContractStats() external view returns (
+        uint256 totalUsersCount,
+        uint256 totalFundsReceivedAmount, 
+        uint256 totalPaidOutAmount,
+        uint256 totalHourlyPaidAmount,
+        uint256 contractBalance
+    ) {
+        return (
+            totalUsers,
+            totalFundsReceived,
+            totalPaidOut,
+            totalHourlyIncomePaid,
+            usdt.balanceOf(address(this))
+        );
     }
-
-
-
-    function fixUserDownlines(address userAddr, address[] calldata correctDownlines) external onlyAdmin {
-        require(hasBeenMigrated[userAddr]);
-        require(users[userAddr].directReferrals == correctDownlines.length);
+    
+    function hasEnoughBalance() external view returns (bool) {
+        return usdt.balanceOf(address(this)) >= MIN_CONTRACT_BALANCE;
+    }
+    
+    function getQueueInfo(address teamLeader) external view returns (
+        address[] memory queueMembers,
+        uint256[] memory positions,
+        uint256 queueLength
+    ) {
+        address[] memory queue = teamAutopoolQueue[teamLeader];
+        uint256[] memory memberPositions = new uint256[](queue.length);
         
-        delete userDownlines[userAddr];
-        for (uint256 i = 0; i < correctDownlines.length; i++) {
-            require(correctDownlines[i] != address(0));
-            userDownlines[userAddr].push(correctDownlines[i]);
-        }
-        downlinesMigrated[userAddr] = true;
-        emit DownMigrate(userAddr, correctDownlines.length);
-    }
-
-    function rebuildAllConnections() external onlyAdmin {
-        // Clear all downlines
-        for (uint256 i = 0; i < migratedUsers.length; i++) {
-            delete userDownlines[migratedUsers[i]];
-        }
-        
-        // Rebuild from referrer relationships
-        for (uint256 i = 0; i < migratedUsers.length; i++) {
-            address user = migratedUsers[i];
-            address referrer = users[user].referrer;
-            if (referrer != address(0)) {
-                userDownlines[referrer].push(user);
-            }
+        for (uint256 i = 0; i < queue.length; i++) {
+            memberPositions[i] = autopoolPosition[queue[i]];
         }
         
-        // Mark all as migrated
-        for (uint256 i = 0; i < migratedUsers.length; i++) {
-            downlinesMigrated[migratedUsers[i]] = true;
+        return (queue, memberPositions, queue.length);
+    }
+    
+    function getUserQueuePosition(address userAddr) external view returns (
+        address teamLeader,
+        uint256 position,
+        uint256 queueLength,
+        bool isInPool
+    ) {
+        address leader = userTeamLeader[userAddr];
+        uint256 pos = autopoolPosition[userAddr];
+        uint256 length = teamAutopoolQueue[leader].length;
+        bool inPool = isAutopoolActive[userAddr];
+        
+        return (leader, pos, length, inPool);
+    }
+    
+    function canUserJoinAutopool(address userAddr) external view returns (bool canJoin, string memory reason) {
+        if (isAutopoolActive[userAddr]) {
+            return (false, "Already in autopool");
         }
+        if (!users[userAddr].isActive) {
+            return (false, "User not active");
+        }
+        if (users[userAddr].reachedTotalLimit) {
+            return (false, "User reached limit, must rejoin");
+        }
+        return (true, "Can join autopool");
     }
 
-
-
-    function getPendingSalary(address userAddr) external view returns (uint256) {
+    // FIXED: Split into two functions to avoid stack too deep
+    function getUserBasicInfo(address userAddr) external view returns (
+        bool isActive,
+        uint256 directReferrals,
+        uint256 activeDirects,
+        address referrer
+    ) {
         User memory user = users[userAddr];
-        if (!user.salaryEnabled || user.lastSalaryUpdate == 0) return pendingSalary[userAddr];
-        uint256 daysPassed = (block.timestamp - user.lastSalaryUpdate) / SALARY_INTERVAL;
-        return daysPassed > 0 ? pendingSalary[userAddr] + daysPassed * DAILY_SALARY : pendingSalary[userAddr];
+        return (
+            user.isActive,
+            user.directReferrals,
+            user.activeDirects,
+            user.referrer
+        );
     }
     
-    // Migration stats
-    function getComprehensiveMigrationStats() external view returns (uint256, uint256, bool) {
-        return (migratedUsersCount, migrationCurrentIndex, migrationCompleted);
+    function getUserClaimInfo(address userAddr) external view returns (
+        uint256 autopoolPending,
+        uint256 hourlyPending,
+        bool canClaimROI,
+        bool canClaimAutopool,
+        bool isInAutopool,
+        uint256 timeInPool,
+        string memory claimPriority
+    ) {
+        User memory user = users[userAddr];
+        
+        return (
+            autopoolPendingBalance[userAddr],
+            this.getPendingHourlyIncome(userAddr),
+            this.getPendingHourlyIncome(userAddr) >= MIN_HOURLY_CLAIM && hasActiveDirectReferral(userAddr),
+            autopoolPendingBalance[userAddr] >= MIN_CLAIM_AMOUNT && hasActiveDirectReferral(userAddr),
+            isAutopoolActive[userAddr],
+            user.lastPoolJoinTime > 0 ? block.timestamp - user.lastPoolJoinTime : 0,
+            _getClaimPriority(userAddr)
+        );
     }
-
-    function getContractStats() external view returns (uint256, uint256, uint256, uint256) {
-        return (totalUsers, usdt.balanceOf(address(this)), totalFundsReceived, totalPaidOut);
+    
+    // Helper function to reduce stack depth
+    function _getClaimPriority(address userAddr) internal view returns (string memory) {
+        if (!hasActiveDirectReferral(userAddr)) {
+            return "Need 1 active direct";
+        }
+        
+        bool canClaimROI = this.getPendingHourlyIncome(userAddr) >= MIN_HOURLY_CLAIM;
+        bool canClaimAutopool = autopoolPendingBalance[userAddr] >= MIN_CLAIM_AMOUNT;
+        
+        if (canClaimROI && canClaimAutopool) {
+            return "Choose: Claim ROI OR autopool (both ready)";
+        }
+        if (canClaimROI) {
+            return "Can claim ROI";
+        }
+        if (canClaimAutopool) {
+            return "Can claim autopool";
+        }
+        return "No claimable amounts";
+    }
+    
+    function getTeamJoinCount(address teamLeader) external view returns (uint256) {
+        return teamJoinCount[teamLeader];
+    }
+    
+    function getTeamAutopoolQueue(address teamLeader) external view returns (address[] memory) {
+        return teamAutopoolQueue[teamLeader];
     }
 }
