@@ -1,5 +1,5 @@
 /**
- *Submitted for verification at BscScan.com on 2025-07-19
+ *Submitted for verification at BscScan.com on 2025-07-20
 */
 
 // SPDX-License-Identifier: MIT
@@ -17,32 +17,31 @@ interface IAutoPoolFundV12 {
         uint256 joinCount, uint256 rejoinCount, bool isActive, bool reachedTotalLimit, uint256 directReferrals
     );
     function userDownlines(address user, uint256 index) external view returns (address);
+    function userPendingROI(address user) external view returns (uint256);
     function autopoolPendingBalance(address user) external view returns (uint256);
+    function userTotalROIClaims(address user) external view returns (uint256);
     function migratedUsers(uint256 index) external view returns (address);
     function migratedUsersCount() external view returns (uint256);
     function totalUsers() external view returns (uint256);
 }
 
-contract AutoPoolFundV12Final {
+contract TeamBasedAutoPool {
     IERC20 public usdt;
     address public admin;
     bool internal locked;
-    bool public emergencyPaused;
     IAutoPoolFundV12 private oldV12Contract;
 
     // Constants
     uint256 public constant ENTRY_FEE = 10 * 1e18;
     uint256 public constant REJOIN_FEE = 10 * 1e18;
-    uint256 public constant ADMIN_FEE_PER_JOIN = 2 * 1e18;
-    uint256 public constant ADMIN_FEE_FROM_ENTRY = 2 * 1e18;
-    uint256 public constant MIN_CONTRACT_BALANCE = 200 * 1e18;
-    uint256 public constant AUTOPOOL_COMMISSION = 20 * 1e18;
-    uint256 public constant MIN_CLAIM_AMOUNT = 20 * 1e18;
-    uint256 public constant TEAM_POOL_SIZE = 3;
-    uint256 public constant MIN_DIRECT_FOR_CLAIM = 1;
-    uint256 public constant HOURLY_INCOME = 12 * 1e18;
-    uint256 public constant HOURLY_INCOME_INTERVAL = 1 hours;
-    uint256 public constant MIN_HOURLY_CLAIM = 12 * 1e18;
+    uint256 public constant ADMIN_FEE_ENTRY = 2 * 1e18;
+    uint256 public constant ADMIN_FEE_REJOIN = 1 * 1e18;
+    uint256 public constant POOL_PAYOUT = 20 * 1e18;
+    uint256 public constant ROI_PAYOUT = 12 * 1e18;
+    uint256 public constant ROI_DURATION = 1 hours;
+    uint256 public constant TEAM_SIZE = 3; // 3 members needed for pool payout
+    uint256 public constant MIN_TOTAL_DIRECTS = 1;
+    uint256 public constant NET_PROFIT_CAP = 20 * 1e18; // 20 USDT net profit cap
 
     struct User {
         address referrer;
@@ -51,61 +50,56 @@ contract AutoPoolFundV12Final {
         uint256 joinCount;
         uint256 rejoinCount;
         bool isActive;
-        bool reachedTotalLimit;
-        uint256 directReferrals;
-        uint256 lastPoolJoinTime;
-        uint256 lastHourlyUpdate;
-        uint256 activeDirects;
+        uint256 totalDirectReferrals;
+        uint256 roiStartTime;
+        bool hasPoolPending;
+        bool hasROIPending;
+        uint256 totalInvested;
+        uint256 netProfit;
     }
 
     // Core mappings
     mapping(address => User) public users;
     mapping(address => address[]) public userDownlines;
-    mapping(address => uint256) public autopoolPendingBalance;
-    mapping(address => uint256) public hourlyIncomePending;
+    mapping(address => uint256) public pendingPoolClaim;
+    mapping(address => uint256) public pendingROIClaim;
 
-    // Autopool mappings
-    mapping(address => address[]) public teamAutopoolQueue;
-    mapping(address => address) public userTeamLeader;
-    mapping(address => uint256) public autopoolTotalEarned;
-    mapping(address => uint256) public autopoolPosition;
-    mapping(address => bool) public isAutopoolActive;
-    mapping(address => uint256) public teamJoinCount; // Track joins per team leader
-    mapping(address => bool) public autopoolProcessing; // Race condition protection
+    // Team pool mappings
+    mapping(address => address[]) public teamPools; // referrer => pool queue
+    mapping(address => uint256) public userPoolPosition; // user => position in their team pool
 
     // Migration mappings
     mapping(address => bool) public hasBeenMigrated;
     mapping(address => bool) public downlinesMigrated;
     address[] public migratedUsers;
     uint256 public migratedUsersCount;
-    uint256 public migrationCurrentIndex;
     bool public migrationCompleted;
     uint8 public currentMigrationPhase;
-
-    // New migration system
     uint256 public newMigrationIndex;
     uint256 public totalUsersMigrated;
     bool public newMigrationActive;
 
-    // State variables
+    // Stats
     uint256 public totalUsers;
     uint256 public totalFundsReceived;
-    uint256 public totalPaidOut;
-    uint256 public totalHourlyIncomePaid;
+    uint256 public totalPoolPayouts;
+    uint256 public totalROIPayouts;
 
     event Join(address indexed user, address indexed referrer, uint256 fee);
     event Rejoin(address indexed user, address indexed referrer, uint256 fee);
-    event PoolOut(address indexed user, address indexed leader, uint256 amount, uint256 pos);
+    event PoolPayout(address indexed user, address indexed teamLeader, uint256 amount, uint256 position);
+    event ROIPayout(address indexed user, uint256 amount);
     event PoolClaim(address indexed user, uint256 amount);
-    event HourlyIncomeAdd(address indexed user, uint256 amount, uint256 total, uint256 time);
-    event HourlyIncomeClaim(address indexed user, uint256 amount);
-    event AutopoolReset(address indexed user, uint256 resetAmount, string reason);
+    event ROIClaim(address indexed user, uint256 amount);
+    event ActiveDirectUpdate(address indexed referrer, address indexed direct, uint256 newCount);
+    event NetProfitCapReached(address indexed user, uint256 netProfit);
+    
+    // Migration events
     event Migrate(address indexed user, address indexed referrer, uint256 dirs, uint256 earned);
+    event UserDeactivated(address indexed user, uint256 rejoinCount, string reason);
     event DownMigrate(address indexed user, uint256 count);
     event BatchDone(uint256 batch, uint256 index, uint256 time);
     event MigrateDone(uint256 total, uint256 time);
-    event EmergencyPause(uint256 timestamp);
-    event EmergencyUnpause(uint256 timestamp);
 
     modifier noReentrant() {
         require(!locked);
@@ -124,487 +118,369 @@ contract AutoPoolFundV12Final {
         _;
     }
 
-    modifier whenNotPaused() {
-        require(!emergencyPaused, "Contract is paused");
-        _;
-    }
-
-    modifier emergencyOnly() {
-        require(emergencyPaused, "Only during emergency");
-        _;
-    }
-
     constructor() {
         usdt = IERC20(0x55d398326f99059fF775485246999027B3197955);
         admin = 0x3Da7310861fbBdf5105ea6963A2C39d0Cb34a4Ff;
         oldV12Contract = IAutoPoolFundV12(0x982e0C94E805eaa405E12E0ee0531A245934D244);
+        
+        // Initialize admin
         users[admin].isActive = true;
         users[admin].lastJoinTime = block.timestamp;
         users[admin].joinCount = 1;
+        users[admin].roiStartTime = block.timestamp;
+        users[admin].totalDirectReferrals = 0;
     }
 
-    // SIMPLIFIED: Check 1 direct referral that is active (Gas optimized)
-    function hasActiveDirectReferral(address userAddr) public view returns (bool) {
-        if (users[userAddr].directReferrals == 0) return false;
-        
-        // Check if any direct referral is active (cap loop to prevent gas issues)
-        address[] memory downlines = userDownlines[userAddr];
-        uint256 maxCheck = downlines.length > 50 ? 50 : downlines.length; // Gas limit protection
-        
-        for (uint256 i = 0; i < maxCheck; i++) {
-            if (downlines[i] != address(0) && users[downlines[i]].isActive) {
-                return true; // Found at least 1 active direct
-            }
-        }
-        return false; // No active directs found
-    }
+    // ===================
+    // MAIN FUNCTIONS
+    // ===================
 
-    // BUSINESS LOGIC: Either/Or system - user can claim EITHER autopool OR ROI
-    function getClaimableInfo(address userAddr) external view returns (
-        bool canClaimROI,
-        bool canClaimAutopool, 
-        uint256 roiAmount,
-        uint256 autopoolAmount,
-        string memory message
-    ) {
-        uint256 hourlyPending = this.getPendingHourlyIncome(userAddr);
-        uint256 autopoolPending = autopoolPendingBalance[userAddr];
-        bool hasRequiredDirects = hasActiveDirectReferral(userAddr);
-        
-        canClaimROI = hourlyPending >= MIN_HOURLY_CLAIM && hasRequiredDirects;
-        canClaimAutopool = autopoolPending >= MIN_CLAIM_AMOUNT && hasRequiredDirects;
-        
-        roiAmount = hourlyPending;
-        autopoolAmount = autopoolPending;
-        
-        if (!hasRequiredDirects) {
-            message = "Need 1 active direct to claim";
-        } else if (canClaimROI && canClaimAutopool) {
-            message = "You can claim EITHER ROI or autopool earnings";
-        } else if (canClaimROI) {
-            message = "Can claim ROI earnings";
-        } else if (canClaimAutopool) {
-            message = "Can claim autopool earnings";
-        } else {
-            message = "No claimable amounts available";
-        }
-    }
-
-    // BUSINESS LOGIC: Show user their earning options (Either/Or system)
-    function getEarningsOptions(address userAddr) external view returns (
-        uint256 roiAmount,
-        uint256 autopoolAmount,
-        bool canClaimROI,
-        bool canClaimAutopool,
-        bool hasRequiredDirects,
-        string memory options
-    ) {
-        uint256 hourlyPending = this.getPendingHourlyIncome(userAddr);
-        uint256 autopoolPending = autopoolPendingBalance[userAddr];
-        bool hasDirects = hasActiveDirectReferral(userAddr);
-        
-        bool _canClaimROI = hourlyPending >= MIN_HOURLY_CLAIM && hasDirects;
-        bool _canClaimAutopool = autopoolPending >= MIN_CLAIM_AMOUNT && hasDirects;
-        
-        string memory message;
-        if (_canClaimROI && _canClaimAutopool) {
-            message = "You can choose: Claim ROI OR claim autopool (both available)";
-        } else if (_canClaimROI) {
-            message = "ROI available for claiming";
-        } else if (_canClaimAutopool) {
-            message = "Autopool available for claiming";
-        } else {
-            message = "No earnings ready for claiming yet";
-        }
-        
-        return (
-            hourlyPending,
-            autopoolPending,
-            _canClaimROI,
-            _canClaimAutopool,
-            hasDirects,
-            message
-        );
-    }
-
-    // FIXED: Join Function with proper security and validation
-    function join(address referrer) external postMigration noReentrant whenNotPaused {
-        // CHECKS: Input validation
-        require(msg.sender != address(0), "Invalid sender address");
-        require(usdt.balanceOf(msg.sender) >= ENTRY_FEE, "Insufficient USDT balance");
-        require(usdt.balanceOf(address(this)) >= MIN_CONTRACT_BALANCE, "Contract balance too low");
-        
+    function join(address referrer) external postMigration noReentrant {
         User storage user = users[msg.sender];
-
-        if (user.reachedTotalLimit) {
-            // REJOIN LOGIC
-            require(usdt.balanceOf(msg.sender) >= REJOIN_FEE, "Insufficient USDT for rejoin");
-            require(user.referrer != address(0), "Invalid referrer for rejoin");
-            
-            // EFFECTS: Update state before external calls
-            user.rejoinCount += 1;
-            user.reachedTotalLimit = false;
-            user.isActive = true;
-            user.lastJoinTime = block.timestamp;
-            user.joinCount += 1;
-            totalFundsReceived += REJOIN_FEE;
-            
-            // Reset directs to 0 on rejoin as per requirement  
-            user.directReferrals = 0;
-            user.activeDirects = 0;
-            
-            // CRITICAL FIX: Correct state update order
-            // 1. First recalculate this user's own directs (after state is set)
-            _recalculateDirectReferrals(msg.sender);
-            _recalculateActiveDirects(msg.sender);
-            
-            // 2. THEN update referrer's active direct count (now that user is active)
-            _updateReferrerActiveDirects(msg.sender, true);
-            
-            // INTERACTIONS: External calls last
-            require(usdt.transferFrom(msg.sender, address(this), REJOIN_FEE), "Rejoin fee transfer failed");
-            require(usdt.transfer(admin, ADMIN_FEE_PER_JOIN), "Admin fee transfer failed");
-            
-            _enterUserIntoAutopool(msg.sender);
-            emit Rejoin(msg.sender, user.referrer, REJOIN_FEE);
-            return;
-        }
-
-        // FIRST-TIME JOIN LOGIC
-        require(!user.isActive && user.joinCount == 0, "User already joined");
-        require(usdt.balanceOf(msg.sender) >= ENTRY_FEE, "Insufficient USDT for entry");
+        require(!user.isActive, "User already active");
+        require(user.joinCount == 0, "Use rejoin function");
+        require(usdt.transferFrom(msg.sender, address(this), ENTRY_FEE), "Transfer failed");
 
         // Validate referrer
         address actualReferrer = admin;
         if (referrer != address(0) && referrer != msg.sender && users[referrer].isActive) {
             actualReferrer = referrer;
         }
-        require(actualReferrer != address(0), "Invalid referrer");
-        
-        // EFFECTS: Update all state before external calls
+
+        // Set user data
         user.referrer = actualReferrer;
         user.isActive = true;
         user.lastJoinTime = block.timestamp;
         user.joinCount = 1;
         user.rejoinCount = 0;
-        user.directReferrals = 0;
-        user.lastPoolJoinTime = 0;
-        user.lastHourlyUpdate = 0;
-        user.activeDirects = 0;
-        
-        // Add to downlines safely
+        user.roiStartTime = block.timestamp;
+        user.hasPoolPending = false;
+        user.hasROIPending = false;
+
+        user.totalDirectReferrals = 0; // Initialize to 0
+        user.totalInvested += ENTRY_FEE; // Track investment
+        user.netProfit = user.totalEarned - user.totalInvested; // Calculate net profit
+
+        // Add to referrer's downlines and update active count
         userDownlines[actualReferrer].push(msg.sender);
-        users[actualReferrer].directReferrals += 1;
+        users[actualReferrer].totalDirectReferrals += 1;
         
+        // BUG FIX #2: Remove duplicate active direct update (handled in _enterTeamPool)
+        // Active direct count will be updated in _enterTeamPool function
+
+        // Enter team pool (BUG FIX #5: Use active team leader)
+        address activeTeamLeader = _getActiveTeamLeader(msg.sender);
+        _enterTeamPool(msg.sender, activeTeamLeader);
+
+        // Admin fee and stats
+        require(usdt.transfer(admin, ADMIN_FEE_ENTRY), "Admin fee transfer failed");
         totalUsers += 1;
         totalFundsReceived += ENTRY_FEE;
-        
-        // INTERACTIONS: External calls last
-        require(usdt.transferFrom(msg.sender, address(this), ENTRY_FEE), "Entry fee transfer failed");
-        require(usdt.transfer(admin, ADMIN_FEE_FROM_ENTRY), "Admin fee transfer failed");
-        
-        // Update referrer's active direct count after successful join
-        _updateReferrerActiveDirects(msg.sender, true);
 
-        _enterUserIntoAutopool(msg.sender);
-        emit Join(msg.sender, user.referrer, ENTRY_FEE);
+        emit Join(msg.sender, actualReferrer, ENTRY_FEE);
     }
 
-    // FIXED: Improved claim function with ROI priority logic
-    function claimAutopoolEarnings() external postMigration noReentrant whenNotPaused {
-        // CHECKS: Input validation and requirements
-        require(usdt.balanceOf(address(this)) >= MIN_CONTRACT_BALANCE, "Insufficient contract balance");
-        require(hasActiveDirectReferral(msg.sender), "Need 1 active direct to claim");
-        require(msg.sender != address(0), "Invalid address");
-        
-        uint256 pending = autopoolPendingBalance[msg.sender];
-        require(pending >= MIN_CLAIM_AMOUNT, "Below minimum claim amount");
-        require(usdt.balanceOf(address(this)) >= pending, "Insufficient funds for transfer");
-        
-        // EFFECTS: Update all state first (CEI Pattern)
-        autopoolPendingBalance[msg.sender] = 0;
-        users[msg.sender].totalEarned += pending;
-        totalPaidOut += pending;
-        
-        // Update referrer's active direct count before making user inactive
-        _updateReferrerActiveDirects(msg.sender, false);
+    function rejoin() external postMigration noReentrant {
+        User storage user = users[msg.sender];
+        require(!user.isActive, "User already active");
+        require(user.joinCount > 0, "Use join function first");
+        require(usdt.transferFrom(msg.sender, address(this), REJOIN_FEE), "Transfer failed");
 
-        users[msg.sender].isActive = false;
-        users[msg.sender].reachedTotalLimit = true;
-        
-        // INTERACTIONS: External calls last
-        require(usdt.transfer(msg.sender, pending), "Transfer failed");
-        emit PoolClaim(msg.sender, pending);
-    }
+        // Clear any pending claims first
+        pendingPoolClaim[msg.sender] = 0;
+        pendingROIClaim[msg.sender] = 0;
 
-    function claimHourlyIncome() external postMigration noReentrant whenNotPaused {
-        // CHECKS: Input validation and requirements
-        require(usdt.balanceOf(address(this)) >= MIN_CONTRACT_BALANCE, "Insufficient contract balance");
-        require(hasActiveDirectReferral(msg.sender), "Need 1 active direct to claim");
-        require(msg.sender != address(0), "Invalid address");
+        // Reset user state
+        user.isActive = true;
+        user.lastJoinTime = block.timestamp;
+        user.rejoinCount += 1;
+        user.roiStartTime = block.timestamp;
+        user.hasPoolPending = false;
+        user.hasROIPending = false;
         
-        // Update hourly income calculation first
-        _updateHourlyIncome(msg.sender);
+
         
-        uint256 pending = hourlyIncomePending[msg.sender];
-        require(pending >= MIN_HOURLY_CLAIM, "Below minimum hourly claim amount");
-        require(usdt.balanceOf(address(this)) >= pending, "Insufficient funds for transfer");
-        
-        // EFFECTS: Update all state first (CEI Pattern)
-        hourlyIncomePending[msg.sender] = 0;
-        totalHourlyIncomePaid += pending;
-        users[msg.sender].totalEarned += pending;
-        
-        // Update referrer's active direct count before making user inactive
-        _updateReferrerActiveDirects(msg.sender, false);
-        
-        users[msg.sender].isActive = false;
-        users[msg.sender].reachedTotalLimit = true;
-        
-        // INTERACTIONS: External calls last
-        require(usdt.transfer(msg.sender, pending), "Transfer failed");
-        emit HourlyIncomeClaim(msg.sender, pending);
+        // Track investment
+        user.totalInvested += REJOIN_FEE;
+        user.netProfit = user.totalEarned - user.totalInvested;
+
+
+
+        // Re-enter team pool (BUG FIX #5: Use active team leader)
+        address activeTeamLeader = _getActiveTeamLeader(msg.sender);
+        _enterTeamPool(msg.sender, activeTeamLeader);
+
+        // Admin fee and stats
+        require(usdt.transfer(admin, ADMIN_FEE_REJOIN), "Admin fee transfer failed");
+        totalFundsReceived += REJOIN_FEE;
+
+        emit Rejoin(msg.sender, user.referrer, REJOIN_FEE);
     }
 
-        // MUTUAL EXCLUSION: User gets EITHER autopool OR ROI (CAPPED AT 1 HOUR)
-    function _updateHourlyIncome(address userAddr) internal {
-        User storage user = users[userAddr];
-        
-        // Only calculate for active users who are in autopool
-        if (!user.isActive || user.reachedTotalLimit || !isAutopoolActive[userAddr]) return;
-        
-        // MUTUAL EXCLUSION: If user already has autopool income, NO ROI updates
-        if (autopoolPendingBalance[userAddr] > 0) return;
-        
-        // Calculate hours since join/rejoin time
-        uint256 hoursSinceJoin = (block.timestamp - user.lastJoinTime) / HOURLY_INCOME_INTERVAL;
-        
-        if (hoursSinceJoin >= 1) {
-            // CRITICAL FIX: ROI stops after 1 hour - only give 12 USDT maximum
-            uint256 roiAmount = HOURLY_INCOME; // Always 12 USDT (1 hour max)
-            
-            // Set pending amount (capped at 1 hour)
-            hourlyIncomePending[userAddr] = roiAmount;
-            
-            // User automatically exits pool after getting ROI
-            _removeUserFromAutopool(userAddr);
-            
-            emit HourlyIncomeAdd(userAddr, roiAmount, hourlyIncomePending[userAddr], block.timestamp);
-        }
-    }
 
-    function _removeUserFromAutopool(address userAddr) internal {
-        // Input validation
-        if (userAddr == address(0) || !isAutopoolActive[userAddr]) return;
-        
-        address teamLeader = userTeamLeader[userAddr];
-        if (teamLeader == address(0)) return;
-        
-        address[] storage queue = teamAutopoolQueue[teamLeader];
-        if (queue.length == 0) return;
-        
-        // Find and remove user from queue with bounds checking
-        bool userFound = false;
-        for (uint256 i = 0; i < queue.length; i++) {
-            if (queue[i] == userAddr) {
-                userFound = true;
-                // Shift remaining users up with proper bounds checking
-                for (uint256 j = i; j < queue.length - 1; j++) {
-                    require(j + 1 < queue.length, "Array bounds error");
-                    queue[j] = queue[j + 1];
-                    // Update position mapping safely
-                    if (queue[j] != address(0)) {
-                        autopoolPosition[queue[j]] = j;
-                    }
-                }
-                // Safe array pop
-                if (queue.length > 0) {
-                    queue.pop();
-                }
-                break;
-            }
-        }
-        
-        // Only reset status if user was actually found and removed
-        if (userFound) {
-            isAutopoolActive[userAddr] = false;
-            userTeamLeader[userAddr] = address(0);
-            autopoolPosition[userAddr] = 0;
-            users[userAddr].lastPoolJoinTime = 0;
-            users[userAddr].lastHourlyUpdate = 0;
-        }
-    }
 
-    // Recalculate direct referrals count for a user (used on rejoin)
-    function _recalculateDirectReferrals(address userAddr) internal {
-        if (userAddr == address(0)) return;
-        
-        address[] memory downlines = userDownlines[userAddr];
-        users[userAddr].directReferrals = downlines.length;
-    }
-        
-        // FIXED: Recalculate active directs for a user (used on rejoin) with gas limit protection
-    function _recalculateActiveDirects(address userAddr) internal {
-        if (userAddr == address(0)) return;
-        
-        users[userAddr].activeDirects = 0;
-        address[] memory downlines = userDownlines[userAddr];
-        
-        // Prevent gas limit issues by capping the loop
-        uint256 maxCheck = downlines.length > 100 ? 100 : downlines.length;
-        
-        for (uint256 i = 0; i < maxCheck; i++) {
-            address direct = downlines[i];
-            if (direct == address(0)) continue;
-            
-            // Active direct = user is active AND has at least 1 direct referral themselves
-            if (users[direct].isActive && users[direct].directReferrals >= 1) {
-                users[userAddr].activeDirects += 1;
-            }
-        }
-    }
-        
-    // CRITICAL FIX: Properly validate user state when updating referrer's active direct count
-    function _updateReferrerActiveDirects(address userAddr, bool isBecomingActive) internal {
-        if (userAddr == address(0)) return;
-        
+    // Remove manual recalculation function - now done automatically during migration
+    // BUG FIX #5: Ensure users join active referrer's pool or admin's pool
+    function _getActiveTeamLeader(address userAddr) internal view returns (address) {
         address referrer = users[userAddr].referrer;
-        if (referrer == address(0) || referrer == admin) return;
         
-        User memory user = users[userAddr];
-        User storage referrerData = users[referrer];
-        
-        // CRITICAL: Only count as active direct if user is ACTUALLY active AND has >= 1 direct
-        bool isQualifiedActiveDirectNow = user.isActive && user.directReferrals >= 1;
-        
-        if (isBecomingActive) {
-            // User is becoming active - check if they qualify as active direct
-            if (isQualifiedActiveDirectNow) {
-                referrerData.activeDirects += 1;
-            }
-        } else {
-            // User is becoming inactive - check if they were qualified before
-            bool wasQualifiedBefore = user.directReferrals >= 1; // They had directs when active
-            if (wasQualifiedBefore && referrerData.activeDirects > 0) {
-                referrerData.activeDirects -= 1;
-            }
-        }
-        
-        // SAFETY: Ensure activeDirects never exceeds actual directReferrals
-        if (referrerData.activeDirects > referrerData.directReferrals) {
-            referrerData.activeDirects = referrerData.directReferrals;
-        }
-    }
-    
-    // Get user's pending hourly income (CAPPED AT 1 HOUR MAXIMUM)
-    function getPendingHourlyIncome(address userAddr) external view returns (uint256) {
-        User memory user = users[userAddr];
-        
-        // Only calculate for active users who are in autopool
-        if (!user.isActive || user.reachedTotalLimit || !isAutopoolActive[userAddr]) {
-            return hourlyIncomePending[userAddr];
-        }
-        
-        // Don't give hourly income if user already earned pool commission
-        if (autopoolPendingBalance[userAddr] > 0) {
-            return hourlyIncomePending[userAddr];
-        }
-        
-        // Calculate hours since join/rejoin time but CAP AT 1 HOUR
-        uint256 hoursSinceJoin = (block.timestamp - user.lastJoinTime) / HOURLY_INCOME_INTERVAL;
-        
-        if (hoursSinceJoin >= 1) {
-            // CRITICAL FIX: ROI stops after 1 hour - only give 1 hour worth (12 USDT max)
-            return HOURLY_INCOME; // Always 12 USDT maximum (1 hour only)
-        }
-        
-        return hourlyIncomePending[userAddr];
-    }
-    
-    // REMOVED: Manual update function no longer needed - income calculates automatically from join time
-
-    function _enterUserIntoAutopool(address userAddr) internal {
-        if (!isAutopoolActive[userAddr]) {
-        address teamLeader = _getTeamLeader(userAddr);
-        userTeamLeader[userAddr] = teamLeader;
-        teamAutopoolQueue[teamLeader].push(userAddr);
-        autopoolPosition[userAddr] = teamAutopoolQueue[teamLeader].length - 1;
-        isAutopoolActive[userAddr] = true;
-            
-            users[userAddr].lastPoolJoinTime = block.timestamp;
-            // REMOVED: lastHourlyUpdate - now using lastJoinTime for automatic calculation
-            
-        processTeamAutopool(teamLeader);
-        }
-    }
-
-    function _getTeamLeader(address userAddr) internal view returns (address) {
-        address referrer = users[userAddr].referrer;
-        if (referrer != address(0) && referrer != userAddr && users[referrer].isActive && referrer != admin) {
+        // If referrer is active, use their pool
+        if (referrer != address(0) && users[referrer].isActive) {
             return referrer;
         }
+        
+        // Otherwise, assign to admin's pool to prevent dead pools
         return admin;
     }
 
-    // CRITICAL FIX: Race condition protection + Gas-efficient autopool processing
-    function processTeamAutopool(address teamLeader) internal {
-        if (teamLeader == address(0)) return;
+    function _enterTeamPool(address userAddr, address teamLeader) internal {
+        // Remove from any existing pool first
+        _removeFromTeamPool(userAddr);
         
-        // RACE CONDITION PROTECTION: Prevent concurrent processing
-        if (autopoolProcessing[teamLeader]) return;
-        autopoolProcessing[teamLeader] = true;
+        // Add to team pool queue (everyone rotates equally)
+        teamPools[teamLeader].push(userAddr);
+        userPoolPosition[userAddr] = teamPools[teamLeader].length - 1;
         
-        address[] storage queue = teamAutopoolQueue[teamLeader];
+
         
-        // Increment join count for this team leader
-        teamJoinCount[teamLeader]++;
-        
-        // Trigger payout every 2 joins/rejoins (not based on queue size)
-        if (teamJoinCount[teamLeader] % 2 == 0 && queue.length > 0) {
-            address payoutUser = queue[0];
-            if (payoutUser == address(0) || !isAutopoolActive[payoutUser]) {
-                autopoolProcessing[teamLeader] = false;
-                return;
-            }
-            
-            // MUTUAL EXCLUSION: If user already has ROI income, NO autopool payout
-            if (hourlyIncomePending[payoutUser] > 0) {
-                autopoolProcessing[teamLeader] = false;
-                return;
-            }
-            
-            // ATOMIC STATE UPDATE: All changes happen together to prevent race conditions
-            
-            // 1. Pay the user
-            autopoolPendingBalance[payoutUser] += AUTOPOOL_COMMISSION;
-            autopoolTotalEarned[payoutUser] += AUTOPOOL_COMMISSION;
-            
-            // 2. GAS-EFFICIENT REMOVAL: Swap with last element (O(1) instead of O(n))
-            uint256 queueLength = queue.length;
-            if (queueLength > 1) {
-                // Move last element to first position (no shifting needed)
-                address lastUser = queue[queueLength - 1];
-                queue[0] = lastUser;
-                autopoolPosition[lastUser] = 0; // Update position of moved user
-            }
-            queue.pop(); // Remove last element
-            
-            // 3. Reset user's autopool status
-            isAutopoolActive[payoutUser] = false;
-            userTeamLeader[payoutUser] = address(0);
-            autopoolPosition[payoutUser] = 0;
-            users[payoutUser].lastPoolJoinTime = 0;
-            users[payoutUser].lastHourlyUpdate = 0;
-            
-            // 4. Emit event after all state changes are complete
-            emit PoolOut(payoutUser, teamLeader, AUTOPOOL_COMMISSION, teamJoinCount[teamLeader]);
-        }
-        
-        // Release processing lock
-        autopoolProcessing[teamLeader] = false;
+        // Check if pool is ready for payout
+        _processTeamPool(teamLeader);
     }
 
-    // MIGRATION FUNCTIONS (keeping original migration logic)
+    function _processTeamPool(address teamLeader) internal {
+        address[] storage pool = teamPools[teamLeader];
+        
+        if (pool.length >= TEAM_SIZE) {
+            address payoutUser = pool[0]; // First person in queue gets paid
+            
+            // Give pool payout to first user (regardless if it's team leader or member)
+            pendingPoolClaim[payoutUser] = POOL_PAYOUT;
+            users[payoutUser].hasPoolPending = true;
+            users[payoutUser].hasROIPending = false; // No ROI if pool pending
+            users[payoutUser].isActive = false; // BUG FIX #1: Deactivate user who gets pool payout
+            
+            emit PoolPayout(payoutUser, teamLeader, POOL_PAYOUT, 0);
+            
+            // Remove first user and shift queue - EVERYONE rotates equally
+            for (uint256 i = 0; i < pool.length - 1; i++) {
+                pool[i] = pool[i + 1];
+                userPoolPosition[pool[i]] = i;
+            }
+            pool.pop();
+            
+            // Reset position for the paid user
+            userPoolPosition[payoutUser] = 0;
+            
+            totalPoolPayouts += POOL_PAYOUT;
+        }
+    }
+
+    // ===================
+    // CLAIM FUNCTIONS
+    // ===================
+
+    function claimPool() external postMigration noReentrant {
+        User storage user = users[msg.sender];
+        require(user.hasPoolPending, "No pool to claim");
+        require(user.totalDirectReferrals >= MIN_TOTAL_DIRECTS, "Need 1 total direct");
+        
+        uint256 amount = pendingPoolClaim[msg.sender];
+        require(amount > 0, "No pool amount");
+        require(usdt.balanceOf(address(this)) >= amount, "Insufficient contract balance");
+        
+        // Reset state
+        pendingPoolClaim[msg.sender] = 0;
+        user.hasPoolPending = false;
+        user.isActive = false; // User out of pool immediately
+        
+        // Update earnings and net profit
+        user.totalEarned += amount;
+        user.netProfit = user.totalEarned - user.totalInvested;
+        
+        // Check net profit cap and reset directs if needed
+        if (user.netProfit >= NET_PROFIT_CAP) {
+            user.totalDirectReferrals = 0;
+            // Clear downlines array
+            delete userDownlines[msg.sender];
+            emit NetProfitCapReached(msg.sender, user.netProfit);
+        }
+        
+        require(usdt.transfer(msg.sender, amount), "Transfer failed");
+        
+        emit PoolClaim(msg.sender, amount);
+    }
+
+    function claimROI() external postMigration noReentrant {
+        User storage user = users[msg.sender];
+        require(user.isActive, "User not active");
+        require(!user.hasPoolPending, "Has pool pending - claim pool first");
+        require(user.totalDirectReferrals >= MIN_TOTAL_DIRECTS, "Need 1 total direct");
+        require(user.roiStartTime > 0, "ROI not started");
+        
+        // BUG FIX #4: Check if 1 hour passed AND user still in pool (no pool payout received)
+        require(block.timestamp >= user.roiStartTime + ROI_DURATION, "ROI not ready");
+        require(!user.hasPoolPending, "Pool payout received - cannot claim ROI");
+        
+        // Ensure user doesn't already have ROI pending
+        require(!user.hasROIPending, "ROI already pending");
+        
+        // Set ROI pending
+        pendingROIClaim[msg.sender] = ROI_PAYOUT;
+        user.hasROIPending = true;
+        user.isActive = false; // User out of pool
+        
+        // Remove from current pool position
+        _removeFromTeamPool(msg.sender);
+        
+        totalROIPayouts += ROI_PAYOUT;
+        emit ROIPayout(msg.sender, ROI_PAYOUT);
+        
+        // Auto-claim the ROI immediately
+        uint256 amount = pendingROIClaim[msg.sender];
+        require(usdt.balanceOf(address(this)) >= amount, "Insufficient contract balance");
+        
+        // Reset state
+        pendingROIClaim[msg.sender] = 0;
+        user.hasROIPending = false;
+        
+        // Update earnings and net profit
+        user.totalEarned += amount;
+        user.netProfit = user.totalEarned - user.totalInvested;
+        
+        // Check net profit cap and reset directs if needed
+        if (user.netProfit >= NET_PROFIT_CAP) {
+            user.totalDirectReferrals = 0;
+            // Clear downlines array
+            delete userDownlines[msg.sender];
+            emit NetProfitCapReached(msg.sender, user.netProfit);
+        }
+        
+        require(usdt.transfer(msg.sender, amount), "Transfer failed");
+        
+        emit ROIClaim(msg.sender, amount);
+    }
+
+    function _removeFromTeamPool(address userAddr) internal {
+        address teamLeader = users[userAddr].referrer;
+        address[] storage pool = teamPools[teamLeader];
+        uint256 position = userPoolPosition[userAddr];
+        
+        if (position < pool.length && pool[position] == userAddr) {
+            // Remove user and shift positions
+            for (uint256 i = position; i < pool.length - 1; i++) {
+                pool[i] = pool[i + 1];
+                userPoolPosition[pool[i]] = i;
+            }
+            pool.pop();
+            userPoolPosition[userAddr] = 0; // Reset position
+        }
+    }
+
+    // ===================
+    // VIEW FUNCTIONS  
+    // ===================
+
+    function getUserInfo(address userAddr) external view returns (
+        address referrer,
+        bool isActive,
+        uint256 totalDirects,
+        uint256 joinCount,
+        uint256 rejoinCount
+    ) {
+        return (
+            users[userAddr].referrer,
+            users[userAddr].isActive,
+            users[userAddr].totalDirectReferrals,
+            users[userAddr].joinCount,
+            users[userAddr].rejoinCount
+        );
+    }
+
+    function getUserStatus(address userAddr) external view returns (
+        uint256 roiTimeLeft,
+        bool hasPool,
+        bool hasROI,
+        uint256 poolPosition
+    ) {
+        return (
+            (users[userAddr].isActive && users[userAddr].roiStartTime > 0 && block.timestamp < users[userAddr].roiStartTime + ROI_DURATION) 
+                ? (users[userAddr].roiStartTime + ROI_DURATION) - block.timestamp : 0,
+            users[userAddr].hasPoolPending,
+            users[userAddr].hasROIPending,
+            userPoolPosition[userAddr]
+        );
+    }
+
+    function getNetProfitInfo(address userAddr) external view returns (
+        uint256 totalInvested,
+        uint256 totalEarned,
+        uint256 netProfit,
+        uint256 profitCapRemaining,
+        bool willResetDirects
+    ) {
+        User memory user = users[userAddr];
+        uint256 remaining = user.netProfit >= NET_PROFIT_CAP ? 0 : NET_PROFIT_CAP - user.netProfit;
+        bool willReset = user.netProfit >= NET_PROFIT_CAP;
+        
+        return (
+            user.totalInvested,
+            user.totalEarned,
+            user.netProfit,
+            remaining,
+            willReset
+        );
+    }
+
+    function getTeamPoolInfo(address teamLeader) external view returns (
+        address[] memory poolQueue,
+        uint256 poolSize,
+        uint256 membersNeededForPayout,
+        address nextToPayout
+    ) {
+        address[] memory queue = teamPools[teamLeader];
+        uint256 needed = queue.length >= TEAM_SIZE ? 0 : TEAM_SIZE - queue.length;
+        address nextPayout = queue.length > 0 ? queue[0] : address(0);
+        
+        return (queue, queue.length, needed, nextPayout);
+    }
+
+    function getPendingClaims(address userAddr) external view returns (
+        uint256 poolAmount,
+        uint256 roiAmount,
+        bool canClaimPool,
+        bool canClaimROI
+    ) {
+        User memory user = users[userAddr];
+        bool hasTotalDirects = user.totalDirectReferrals >= MIN_TOTAL_DIRECTS;
+        
+        return (
+            pendingPoolClaim[userAddr],
+            pendingROIClaim[userAddr],
+            user.hasPoolPending && hasTotalDirects,
+            user.hasROIPending && hasTotalDirects
+        );
+    }
+
+    function getContractStats() external view returns (
+        uint256 totalUsersCount,
+        uint256 totalFundsReceivedAmount,
+        uint256 totalPoolPayoutsAmount,
+        uint256 totalROIPayoutsAmount,
+        uint256 contractBalance
+    ) {
+        return (
+            totalUsers,
+            totalFundsReceived,
+            totalPoolPayouts,
+            totalROIPayouts,
+            usdt.balanceOf(address(this))
+        );
+    }
+
+    // ===================
+    // MIGRATION FUNCTIONS
+    // ===================
+
     function startNewMigration() external onlyAdmin {
         require(!migrationCompleted, "Migration already completed");
         newMigrationActive = true;
@@ -621,7 +497,7 @@ contract AutoPoolFundV12Final {
         uint256 oldContractTotalUsers;
         try oldV12Contract.totalUsers() returns (uint256 total) {
             oldContractTotalUsers = total;
-            } catch {
+        } catch {
             oldContractTotalUsers = 0;
         }
         
@@ -660,10 +536,10 @@ contract AutoPoolFundV12Final {
                 ) {
                     if (lastJoinTime > 0) {
                         _newMigrateUser(userToMigrate);
-                    processed++;
+                        processed++;
                         totalUsersMigrated++;
-                }
-            } catch {}
+                    }
+                } catch {}
             }
             
             newMigrationIndex++;
@@ -675,10 +551,11 @@ contract AutoPoolFundV12Final {
     function _newMigrateUser(address userAddr) internal {
         try oldV12Contract.users(userAddr) returns (
             address oldReferrer, uint256 oldTotalEarned, uint256 oldLastJoinTime, uint256,
-            uint256 oldJoinCount, uint256 oldRejoinCount, bool oldIsActive, bool oldReachedTotalLimit, uint256 oldDirectReferrals
+            uint256 oldJoinCount, uint256 oldRejoinCount, bool oldIsActive, bool, uint256 oldDirectReferrals
         ) {
             if (oldLastJoinTime == 0) return;
             
+            // Validate referrer
             address validatedReferrer = oldReferrer;
             if (oldReferrer != admin && oldReferrer != address(0)) {
                 if (!hasBeenMigrated[oldReferrer] && !users[oldReferrer].isActive) {
@@ -686,37 +563,40 @@ contract AutoPoolFundV12Final {
                 }
             }
             
+            // Deactivate users who have 2 or more rejoins
+            bool shouldBeActive = oldIsActive;
+            if (oldRejoinCount >= 2) {
+                shouldBeActive = false;
+            }
+            
+            // Set user data for new autopool system
             users[userAddr] = User({
                 referrer: validatedReferrer,
                 totalEarned: oldTotalEarned,
                 lastJoinTime: oldLastJoinTime,
                 joinCount: oldJoinCount,
                 rejoinCount: oldRejoinCount,
-                isActive: oldIsActive,
-                reachedTotalLimit: oldReachedTotalLimit,
-                directReferrals: 0, // RESET to 0 during migration (will restore on rejoin)
-                lastPoolJoinTime: 0,
-                lastHourlyUpdate: 0,
-                activeDirects: 0
+                isActive: shouldBeActive,
+                totalDirectReferrals: 0, // Reset all directs to 0 in migration
+                roiStartTime: shouldBeActive ? block.timestamp : 0,
+                hasPoolPending: false,
+                hasROIPending: false,
+                totalInvested: 0, // Migration users start with 0 investment tracking
+                netProfit: oldTotalEarned // Existing earnings count as net profit
             });
             
-            _newSetUserEarnings(userAddr);
-            
+            // Mark as migrated
             hasBeenMigrated[userAddr] = true;
             migratedUsers.push(userAddr);
             migratedUsersCount++;
             totalUsers++;
             
+            if (oldRejoinCount >= 2) {
+                emit UserDeactivated(userAddr, oldRejoinCount, "User with 2+ rejoins deactivated - must rejoin");
+            }
+            
             emit Migrate(userAddr, validatedReferrer, oldDirectReferrals, oldTotalEarned);
         } catch {}
-    }
-
-    function _newSetUserEarnings(address userAddr) internal {
-        try oldV12Contract.autopoolPendingBalance(userAddr) returns (uint256 balance) {
-            autopoolPendingBalance[userAddr] = balance;
-        } catch { 
-            autopoolPendingBalance[userAddr] = 0; 
-        }
     }
 
     function migrateRemainingSpecificUsers(address[] calldata remainingUserAddresses) external onlyAdmin {
@@ -751,10 +631,18 @@ contract AutoPoolFundV12Final {
     }
 
     function _newMigrateDownlines(address userAddr) internal {
-        uint256 expectedDownlines = users[userAddr].directReferrals;
+        // Get original downline count from old contract (since we reset totalDirectReferrals to 0)
+        uint256 expectedDownlines = 0;
+        try oldV12Contract.users(userAddr) returns (
+            address, uint256, uint256, uint256, uint256, uint256, bool, bool, uint256 oldDirectReferrals
+        ) {
+            expectedDownlines = oldDirectReferrals;
+        } catch {}
+        
         delete userDownlines[userAddr];
         
         uint256 actualCount = 0;
+        
         for (uint256 i = 0; i < expectedDownlines && i < 50; i++) {
             try oldV12Contract.userDownlines(userAddr, i) returns (address downline) {
                 if (downline != address(0)) {
@@ -766,8 +654,12 @@ contract AutoPoolFundV12Final {
             }
         }
         
+
+        
         downlinesMigrated[userAddr] = true;
         emit DownMigrate(userAddr, actualCount);
+        
+
     }
 
     function startDownlinesMigration() external onlyAdmin {
@@ -780,152 +672,30 @@ contract AutoPoolFundV12Final {
         migrationCompleted = true;
         currentMigrationPhase = 2;
         newMigrationActive = false;
+        emit MigrateDone(totalUsersMigrated, block.timestamp);
     }
 
-    // EMERGENCY WITHDRAWAL FUNCTION
-    function emergencyWithdrawAll() external onlyAdmin {
-        uint256 contractBalance = usdt.balanceOf(address(this));
-        require(contractBalance > 0, "No USDT to withdraw");
-        require(usdt.transfer(admin, contractBalance), "Emergency withdrawal failed");
+    function getMigrationStats() external view returns (
+        bool isCompleted,
+        uint256 migratedCount,
+        uint256 totalMigrated,
+        uint8 currentPhase,
+        bool isActive
+    ) {
+        return (
+            migrationCompleted,
+            migratedUsersCount,
+            totalUsersMigrated,
+            currentMigrationPhase,
+            newMigrationActive
+        );
     }
 
-    // UTILITY FUNCTIONS
-    function getUserTotalPending(address userAddr) external view returns (
-        uint256 autopoolPending,
-        uint256 hourlyPending,
-        uint256 totalPending
-    ) {
-        autopoolPending = autopoolPendingBalance[userAddr];
-        hourlyPending = this.getPendingHourlyIncome(userAddr);
-        totalPending = autopoolPending + hourlyPending;
-    }
-    
-    function getContractStats() external view returns (
-        uint256 totalUsersCount,
-        uint256 totalFundsReceivedAmount, 
-        uint256 totalPaidOutAmount,
-        uint256 totalHourlyPaidAmount,
-        uint256 contractBalance
-    ) {
-        return (
-            totalUsers,
-            totalFundsReceived,
-            totalPaidOut,
-            totalHourlyIncomePaid,
-            usdt.balanceOf(address(this))
-        );
-    }
-    
-    function hasEnoughBalance() external view returns (bool) {
-        return usdt.balanceOf(address(this)) >= MIN_CONTRACT_BALANCE;
-    }
-    
-    function getQueueInfo(address teamLeader) external view returns (
-        address[] memory queueMembers,
-        uint256[] memory positions,
-        uint256 queueLength
-    ) {
-        address[] memory queue = teamAutopoolQueue[teamLeader];
-        uint256[] memory memberPositions = new uint256[](queue.length);
-        
-        for (uint256 i = 0; i < queue.length; i++) {
-            memberPositions[i] = autopoolPosition[queue[i]];
-        }
-        
-        return (queue, memberPositions, queue.length);
-    }
-    
-    function getUserQueuePosition(address userAddr) external view returns (
-        address teamLeader,
-        uint256 position,
-        uint256 queueLength,
-        bool isInPool
-    ) {
-        address leader = userTeamLeader[userAddr];
-        uint256 pos = autopoolPosition[userAddr];
-        uint256 length = teamAutopoolQueue[leader].length;
-        bool inPool = isAutopoolActive[userAddr];
-        
-        return (leader, pos, length, inPool);
-    }
-    
-    function canUserJoinAutopool(address userAddr) external view returns (bool canJoin, string memory reason) {
-        if (isAutopoolActive[userAddr]) {
-            return (false, "Already in autopool");
-        }
-        if (!users[userAddr].isActive) {
-            return (false, "User not active");
-        }
-        if (users[userAddr].reachedTotalLimit) {
-            return (false, "User reached limit, must rejoin");
-        }
-        return (true, "Can join autopool");
-    }
+    // ===================
+    // ADMIN FUNCTIONS
+    // ===================
 
-    // FIXED: Split into two functions to avoid stack too deep
-    function getUserBasicInfo(address userAddr) external view returns (
-        bool isActive,
-        uint256 directReferrals,
-        uint256 activeDirects,
-        address referrer
-    ) {
-        User memory user = users[userAddr];
-        return (
-            user.isActive,
-            user.directReferrals,
-            user.activeDirects,
-            user.referrer
-        );
-    }
-    
-    function getUserClaimInfo(address userAddr) external view returns (
-        uint256 autopoolPending,
-        uint256 hourlyPending,
-        bool canClaimROI,
-        bool canClaimAutopool,
-        bool isInAutopool,
-        uint256 timeInPool,
-        string memory claimPriority
-    ) {
-        User memory user = users[userAddr];
-        
-        return (
-            autopoolPendingBalance[userAddr],
-            this.getPendingHourlyIncome(userAddr),
-            this.getPendingHourlyIncome(userAddr) >= MIN_HOURLY_CLAIM && hasActiveDirectReferral(userAddr),
-            autopoolPendingBalance[userAddr] >= MIN_CLAIM_AMOUNT && hasActiveDirectReferral(userAddr),
-            isAutopoolActive[userAddr],
-            user.lastPoolJoinTime > 0 ? block.timestamp - user.lastPoolJoinTime : 0,
-            _getClaimPriority(userAddr)
-        );
-    }
-    
-    // Helper function to reduce stack depth
-    function _getClaimPriority(address userAddr) internal view returns (string memory) {
-        if (!hasActiveDirectReferral(userAddr)) {
-            return "Need 1 active direct";
-        }
-        
-        bool canClaimROI = this.getPendingHourlyIncome(userAddr) >= MIN_HOURLY_CLAIM;
-        bool canClaimAutopool = autopoolPendingBalance[userAddr] >= MIN_CLAIM_AMOUNT;
-        
-        if (canClaimROI && canClaimAutopool) {
-            return "Choose: Claim ROI OR autopool (both ready)";
-        }
-        if (canClaimROI) {
-            return "Can claim ROI";
-        }
-        if (canClaimAutopool) {
-            return "Can claim autopool";
-        }
-        return "No claimable amounts";
-    }
-    
-    function getTeamJoinCount(address teamLeader) external view returns (uint256) {
-        return teamJoinCount[teamLeader];
-    }
-    
-    function getTeamAutopoolQueue(address teamLeader) external view returns (address[] memory) {
-        return teamAutopoolQueue[teamLeader];
+    function emergencyWithdraw(uint256 amount) external onlyAdmin {
+        require(usdt.transfer(admin, amount), "Transfer failed");
     }
 }
