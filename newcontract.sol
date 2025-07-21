@@ -2,6 +2,10 @@
  *Submitted for verification at BscScan.com on 2025-07-20
 */
 
+/**
+ *Submitted for verification at BscScan.com on 2025-07-20
+*/
+
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
@@ -43,9 +47,10 @@ contract TeamBasedAutoPool {
     uint256 public constant MIN_TOTAL_DIRECTS = 1;
     uint256 public constant NET_PROFIT_CAP = 20 * 1e18; // 20 USDT net profit cap
 
+    // UPDATED USER STRUCT - SIMPLIFIED FOR CONTINUOUS RESET
     struct User {
         address referrer;
-        uint256 totalEarned;
+        uint256 totalEarned;           // Total amount earned from claims
         uint256 lastJoinTime;
         uint256 joinCount;
         uint256 rejoinCount;
@@ -54,8 +59,8 @@ contract TeamBasedAutoPool {
         uint256 roiStartTime;
         bool hasPoolPending;
         bool hasROIPending;
-        uint256 totalInvested;
-        uint256 netProfit;
+        uint256 totalRejoined;         // SIMPLIFIED: Only track rejoin amounts (not initial join)
+        uint256 directResetCount;      // NEW: Track how many times directs were reset
     }
 
     // Core mappings
@@ -63,6 +68,7 @@ contract TeamBasedAutoPool {
     mapping(address => address[]) public userDownlines;
     mapping(address => uint256) public pendingPoolClaim;
     mapping(address => uint256) public pendingROIClaim;
+    mapping(address => uint256) public userLastResetTime; // NEW: Track last reset time
 
     // Team pool mappings
     mapping(address => address[]) public teamPools; // referrer => pool queue
@@ -93,6 +99,7 @@ contract TeamBasedAutoPool {
     event ROIClaim(address indexed user, uint256 amount);
     event ActiveDirectUpdate(address indexed referrer, address indexed direct, uint256 newCount);
     event NetProfitCapReached(address indexed user, uint256 netProfit);
+    event DirectsReset(address indexed user, uint256 resetCount, uint256 netProfitAtReset); // NEW EVENT
     
     // Migration events
     event Migrate(address indexed user, address indexed referrer, uint256 dirs, uint256 earned);
@@ -129,10 +136,42 @@ contract TeamBasedAutoPool {
         users[admin].joinCount = 1;
         users[admin].roiStartTime = block.timestamp;
         users[admin].totalDirectReferrals = 0;
+        users[admin].totalRejoined = 0;
+        users[admin].directResetCount = 0;
     }
 
     // ===================
-    // MAIN FUNCTIONS
+    // NET PROFIT FUNCTIONS - SIMPLIFIED
+    // ===================
+
+    // SIMPLE NET PROFIT CALCULATION FUNCTION
+    function calculateNetProfit(address userAddr) public view returns (uint256) {
+        User memory user = users[userAddr];
+        // Net Profit = Total Earned - Total Rejoined Amount
+        return user.totalEarned >= user.totalRejoined ? user.totalEarned - user.totalRejoined : 0;
+    }
+
+    // CHECK AND RESET DIRECTS FUNCTION (called after every earning)
+    function _checkAndResetDirects(address userAddr) internal {
+        User storage user = users[userAddr];
+        uint256 currentNetProfit = calculateNetProfit(userAddr);
+        
+        // If net profit reaches 20 USDT, reset directs
+        if (currentNetProfit >= NET_PROFIT_CAP) {
+            user.totalDirectReferrals = 0;
+            user.directResetCount += 1;
+            userLastResetTime[userAddr] = block.timestamp;
+            
+            // Clear downlines array
+            delete userDownlines[userAddr];
+            
+            emit NetProfitCapReached(userAddr, currentNetProfit);
+            emit DirectsReset(userAddr, user.directResetCount, currentNetProfit);
+        }
+    }
+
+    // ===================
+    // MAIN FUNCTIONS - FIXED
     // ===================
 
     function join(address referrer) external postMigration noReentrant {
@@ -156,19 +195,15 @@ contract TeamBasedAutoPool {
         user.roiStartTime = block.timestamp;
         user.hasPoolPending = false;
         user.hasROIPending = false;
-
-        user.totalDirectReferrals = 0; // Initialize to 0
-        user.totalInvested += ENTRY_FEE; // Track investment
-        user.netProfit = user.totalEarned - user.totalInvested; // Calculate net profit
+        user.totalDirectReferrals = 0;
+        user.totalRejoined = 0; // New users start with 0 rejoined
+        user.directResetCount = 0;
 
         // Add to referrer's downlines and update active count
         userDownlines[actualReferrer].push(msg.sender);
         users[actualReferrer].totalDirectReferrals += 1;
-        
-        // BUG FIX #2: Remove duplicate active direct update (handled in _enterTeamPool)
-        // Active direct count will be updated in _enterTeamPool function
 
-        // Enter team pool (BUG FIX #5: Use active team leader)
+        // Enter team pool
         address activeTeamLeader = _getActiveTeamLeader(msg.sender);
         _enterTeamPool(msg.sender, activeTeamLeader);
 
@@ -198,15 +233,19 @@ contract TeamBasedAutoPool {
         user.hasPoolPending = false;
         user.hasROIPending = false;
         
+        // TRACK REJOIN AMOUNT (this affects net profit calculation)
+        user.totalRejoined += REJOIN_FEE;
 
-        
-        // Track investment
-        user.totalInvested += REJOIN_FEE;
-        user.netProfit = user.totalEarned - user.totalInvested;
+        // FIXED: Update referrer's direct count (if referrer is still active and eligible)
+        if (user.referrer != address(0) && users[user.referrer].isActive) {
+            // Only add direct if referrer hasn't hit their cap
+            uint256 referrerNetProfit = calculateNetProfit(user.referrer);
+            if (referrerNetProfit < NET_PROFIT_CAP) {
+                users[user.referrer].totalDirectReferrals += 1;
+            }
+        }
 
-
-
-        // Re-enter team pool (BUG FIX #5: Use active team leader)
+        // Re-enter team pool
         address activeTeamLeader = _getActiveTeamLeader(msg.sender);
         _enterTeamPool(msg.sender, activeTeamLeader);
 
@@ -217,10 +256,7 @@ contract TeamBasedAutoPool {
         emit Rejoin(msg.sender, user.referrer, REJOIN_FEE);
     }
 
-
-
-    // Remove manual recalculation function - now done automatically during migration
-    // BUG FIX #5: Ensure users join active referrer's pool or admin's pool
+    // HELPER FUNCTIONS
     function _getActiveTeamLeader(address userAddr) internal view returns (address) {
         address referrer = users[userAddr].referrer;
         
@@ -241,8 +277,6 @@ contract TeamBasedAutoPool {
         teamPools[teamLeader].push(userAddr);
         userPoolPosition[userAddr] = teamPools[teamLeader].length - 1;
         
-
-        
         // Check if pool is ready for payout
         _processTeamPool(teamLeader);
     }
@@ -257,7 +291,7 @@ contract TeamBasedAutoPool {
             pendingPoolClaim[payoutUser] = POOL_PAYOUT;
             users[payoutUser].hasPoolPending = true;
             users[payoutUser].hasROIPending = false; // No ROI if pool pending
-            users[payoutUser].isActive = false; // BUG FIX #1: Deactivate user who gets pool payout
+            users[payoutUser].isActive = false; // Deactivate user who gets pool payout
             
             emit PoolPayout(payoutUser, teamLeader, POOL_PAYOUT, 0);
             
@@ -275,8 +309,38 @@ contract TeamBasedAutoPool {
         }
     }
 
+    function _removeFromTeamPool(address userAddr) internal {
+        address teamLeader = users[userAddr].referrer;
+        
+        // If not in referrer's pool, check admin's pool
+        if (teamLeader == address(0) || !_isUserInPool(userAddr, teamLeader)) {
+            teamLeader = admin;
+        }
+        
+        address[] storage pool = teamPools[teamLeader];
+        uint256 position = userPoolPosition[userAddr];
+        
+        // Verify user is actually in this position
+        if (position < pool.length && pool[position] == userAddr) {
+            // Remove user and shift positions
+            for (uint256 i = position; i < pool.length - 1; i++) {
+                pool[i] = pool[i + 1];
+                userPoolPosition[pool[i]] = i;
+            }
+            pool.pop();
+            userPoolPosition[userAddr] = 0; // Reset position
+        }
+    }
+
+    function _isUserInPool(address userAddr, address teamLeader) internal view returns (bool) {
+        address[] memory pool = teamPools[teamLeader];
+        uint256 position = userPoolPosition[userAddr];
+        
+        return position < pool.length && pool[position] == userAddr;
+    }
+
     // ===================
-    // CLAIM FUNCTIONS
+    // CLAIM FUNCTIONS - FIXED
     // ===================
 
     function claimPool() external postMigration noReentrant {
@@ -291,19 +355,13 @@ contract TeamBasedAutoPool {
         // Reset state
         pendingPoolClaim[msg.sender] = 0;
         user.hasPoolPending = false;
-        user.isActive = false; // User out of pool immediately
+        user.isActive = false;
         
-        // Update earnings and net profit
+        // Update earnings
         user.totalEarned += amount;
-        user.netProfit = user.totalEarned - user.totalInvested;
         
-        // Check net profit cap and reset directs if needed
-        if (user.netProfit >= NET_PROFIT_CAP) {
-            user.totalDirectReferrals = 0;
-            // Clear downlines array
-            delete userDownlines[msg.sender];
-            emit NetProfitCapReached(msg.sender, user.netProfit);
-        }
+        // CHECK AND RESET DIRECTS IF NET PROFIT >= 20
+        _checkAndResetDirects(msg.sender);
         
         require(usdt.transfer(msg.sender, amount), "Transfer failed");
         
@@ -316,18 +374,13 @@ contract TeamBasedAutoPool {
         require(!user.hasPoolPending, "Has pool pending - claim pool first");
         require(user.totalDirectReferrals >= MIN_TOTAL_DIRECTS, "Need 1 total direct");
         require(user.roiStartTime > 0, "ROI not started");
-        
-        // BUG FIX #4: Check if 1 hour passed AND user still in pool (no pool payout received)
         require(block.timestamp >= user.roiStartTime + ROI_DURATION, "ROI not ready");
-        require(!user.hasPoolPending, "Pool payout received - cannot claim ROI");
-        
-        // Ensure user doesn't already have ROI pending
         require(!user.hasROIPending, "ROI already pending");
         
         // Set ROI pending
         pendingROIClaim[msg.sender] = ROI_PAYOUT;
         user.hasROIPending = true;
-        user.isActive = false; // User out of pool
+        user.isActive = false;
         
         // Remove from current pool position
         _removeFromTeamPool(msg.sender);
@@ -343,37 +396,15 @@ contract TeamBasedAutoPool {
         pendingROIClaim[msg.sender] = 0;
         user.hasROIPending = false;
         
-        // Update earnings and net profit
+        // Update earnings
         user.totalEarned += amount;
-        user.netProfit = user.totalEarned - user.totalInvested;
         
-        // Check net profit cap and reset directs if needed
-        if (user.netProfit >= NET_PROFIT_CAP) {
-            user.totalDirectReferrals = 0;
-            // Clear downlines array
-            delete userDownlines[msg.sender];
-            emit NetProfitCapReached(msg.sender, user.netProfit);
-        }
+        // CHECK AND RESET DIRECTS IF NET PROFIT >= 20
+        _checkAndResetDirects(msg.sender);
         
         require(usdt.transfer(msg.sender, amount), "Transfer failed");
         
         emit ROIClaim(msg.sender, amount);
-    }
-
-    function _removeFromTeamPool(address userAddr) internal {
-        address teamLeader = users[userAddr].referrer;
-        address[] storage pool = teamPools[teamLeader];
-        uint256 position = userPoolPosition[userAddr];
-        
-        if (position < pool.length && pool[position] == userAddr) {
-            // Remove user and shift positions
-            for (uint256 i = position; i < pool.length - 1; i++) {
-                pool[i] = pool[i + 1];
-                userPoolPosition[pool[i]] = i;
-            }
-            pool.pop();
-            userPoolPosition[userAddr] = 0; // Reset position
-        }
     }
 
     // ===================
@@ -412,21 +443,33 @@ contract TeamBasedAutoPool {
     }
 
     function getNetProfitInfo(address userAddr) external view returns (
-        uint256 totalInvested,
+        uint256 totalRejoined,
         uint256 totalEarned,
-        uint256 netProfit,
+        uint256 currentNetProfit,
         uint256 profitCapRemaining,
-        bool willResetDirects
+        uint256 directResetCount,
+        bool willResetDirectsOnNextClaim
     ) {
         User memory user = users[userAddr];
-        uint256 remaining = user.netProfit >= NET_PROFIT_CAP ? 0 : NET_PROFIT_CAP - user.netProfit;
-        bool willReset = user.netProfit >= NET_PROFIT_CAP;
+        uint256 netProfit = calculateNetProfit(userAddr);
+        uint256 remaining = netProfit >= NET_PROFIT_CAP ? 0 : NET_PROFIT_CAP - netProfit;
+        
+        // Check if next claim will trigger reset
+        bool willReset = false;
+        if (user.hasPoolPending && pendingPoolClaim[userAddr] > 0) {
+            uint256 futureNetProfit = netProfit + pendingPoolClaim[userAddr];
+            willReset = futureNetProfit >= NET_PROFIT_CAP;
+        } else if (user.hasROIPending && pendingROIClaim[userAddr] > 0) {
+            uint256 futureNetProfit = netProfit + pendingROIClaim[userAddr];
+            willReset = futureNetProfit >= NET_PROFIT_CAP;
+        }
         
         return (
-            user.totalInvested,
+            user.totalRejoined,
             user.totalEarned,
-            user.netProfit,
+            netProfit,
             remaining,
+            user.directResetCount,
             willReset
         );
     }
@@ -569,6 +612,9 @@ contract TeamBasedAutoPool {
                 shouldBeActive = false;
             }
             
+            // SIMPLIFIED: For migrated users, calculate how much they rejoined
+            uint256 totalRejoinedAmount = oldRejoinCount * REJOIN_FEE;
+            
             // Set user data for new autopool system
             users[userAddr] = User({
                 referrer: validatedReferrer,
@@ -581,9 +627,12 @@ contract TeamBasedAutoPool {
                 roiStartTime: shouldBeActive ? block.timestamp : 0,
                 hasPoolPending: false,
                 hasROIPending: false,
-                totalInvested: 0, // Migration users start with 0 investment tracking
-                netProfit: oldTotalEarned // Existing earnings count as net profit
+                totalRejoined: totalRejoinedAmount,  // Track rejoin amounts only
+                directResetCount: 0  // Start fresh
             });
+            
+            // Check if they should have directs reset immediately after migration
+            _checkAndResetDirects(userAddr);
             
             // Mark as migrated
             hasBeenMigrated[userAddr] = true;
@@ -654,12 +703,8 @@ contract TeamBasedAutoPool {
             }
         }
         
-
-        
         downlinesMigrated[userAddr] = true;
         emit DownMigrate(userAddr, actualCount);
-        
-
     }
 
     function startDownlinesMigration() external onlyAdmin {
@@ -695,7 +740,195 @@ contract TeamBasedAutoPool {
     // ADMIN FUNCTIONS
     // ===================
 
+    function adminCheckNetProfit(address userAddr) external view onlyAdmin returns (
+        uint256 totalEarned,
+        uint256 totalRejoined,
+        uint256 netProfit,
+        uint256 directResets,
+        bool eligible,
+        uint256 lastResetTime
+    ) {
+        User memory user = users[userAddr];
+        return (
+            user.totalEarned,
+            user.totalRejoined,
+            calculateNetProfit(userAddr),
+            user.directResetCount,
+            user.totalDirectReferrals >= MIN_TOTAL_DIRECTS,
+            userLastResetTime[userAddr]
+        );
+    }
+
+    function adminResetUserDirects(address userAddr) external onlyAdmin {
+        users[userAddr].totalDirectReferrals = 0;
+        delete userDownlines[userAddr];
+        users[userAddr].directResetCount += 1;
+        userLastResetTime[userAddr] = block.timestamp;
+        
+        emit DirectsReset(userAddr, users[userAddr].directResetCount, calculateNetProfit(userAddr));
+    }
+
     function emergencyWithdraw(uint256 amount) external onlyAdmin {
         require(usdt.transfer(admin, amount), "Transfer failed");
+    }
+
+    function adminUpdateUserDirects(address userAddr, uint256 newDirectCount) external onlyAdmin {
+        users[userAddr].totalDirectReferrals = newDirectCount;
+        emit ActiveDirectUpdate(userAddr, address(0), newDirectCount);
+    }
+
+    function adminDeactivateUser(address userAddr, string calldata reason) external onlyAdmin {
+        users[userAddr].isActive = false;
+        _removeFromTeamPool(userAddr);
+        emit UserDeactivated(userAddr, users[userAddr].rejoinCount, reason);
+    }
+
+    function adminGetUserDownlines(address userAddr) external view onlyAdmin returns (address[] memory) {
+        return userDownlines[userAddr];
+    }
+
+    function adminGetTeamPool(address teamLeader) external view onlyAdmin returns (address[] memory) {
+        return teamPools[teamLeader];
+    }
+
+    function adminBulkUpdateDirects(address[] calldata userAddresses, uint256[] calldata directCounts) external onlyAdmin {
+        require(userAddresses.length == directCounts.length, "Array length mismatch");
+        require(userAddresses.length <= 50, "Max 50 users");
+        
+        for (uint256 i = 0; i < userAddresses.length; i++) {
+            users[userAddresses[i]].totalDirectReferrals = directCounts[i];
+        }
+    }
+
+    function adminSetUserEarnings(address userAddr, uint256 newEarnings) external onlyAdmin {
+        users[userAddr].totalEarned = newEarnings;
+        _checkAndResetDirects(userAddr); // Check if reset needed after manual adjustment
+    }
+
+    function adminSetUserRejoined(address userAddr, uint256 newRejoinedAmount) external onlyAdmin {
+        users[userAddr].totalRejoined = newRejoinedAmount;
+        _checkAndResetDirects(userAddr); // Check if reset needed after manual adjustment
+    }
+
+    // ===================
+    // EMERGENCY FUNCTIONS
+    // ===================
+
+    function emergencyPause() external onlyAdmin {
+        migrationCompleted = false; // This will pause all main functions
+    }
+
+    function emergencyUnpause() external onlyAdmin {
+        migrationCompleted = true; // This will resume all main functions
+    }
+
+    function emergencyTransferAdmin(address newAdmin) external onlyAdmin {
+        require(newAdmin != address(0), "Invalid admin address");
+        admin = newAdmin;
+    }
+
+    function emergencyUpdateContract(address newV12Contract) external onlyAdmin {
+        oldV12Contract = IAutoPoolFundV12(newV12Contract);
+    }
+
+    // ===================
+    // ADDITIONAL VIEW FUNCTIONS
+    // ===================
+
+    function getUserDownlines(address userAddr) external view returns (address[] memory) {
+        return userDownlines[userAddr];
+    }
+
+    function getUserPoolPosition(address userAddr) external view returns (uint256) {
+        return userPoolPosition[userAddr];
+    }
+
+    function getTeamPoolMembers(address teamLeader) external view returns (address[] memory) {
+        return teamPools[teamLeader];
+    }
+
+    function isUserMigrated(address userAddr) external view returns (bool) {
+        return hasBeenMigrated[userAddr];
+    }
+
+    function areDownlinesMigrated(address userAddr) external view returns (bool) {
+        return downlinesMigrated[userAddr];
+    }
+
+    function getAllMigratedUsers() external view returns (address[] memory) {
+        return migratedUsers;
+    }
+
+    function getUserResetHistory(address userAddr) external view returns (
+        uint256 resetCount,
+        uint256 lastResetTime,
+        uint256 currentNetProfit,
+        bool eligibleForReset
+    ) {
+        uint256 netProfit = calculateNetProfit(userAddr);
+        return (
+            users[userAddr].directResetCount,
+            userLastResetTime[userAddr],
+            netProfit,
+            netProfit >= NET_PROFIT_CAP
+        );
+    }
+
+    function getDetailedUserInfo(address userAddr) external view returns (
+        User memory userInfo,
+        uint256 netProfit,
+        uint256 poolPosition,
+        address[] memory downlines,
+        bool inPool
+    ) {
+        return (
+            users[userAddr],
+            calculateNetProfit(userAddr),
+            userPoolPosition[userAddr],
+            userDownlines[userAddr],
+            users[userAddr].isActive
+        );
+    }
+
+    function bulkGetNetProfits(address[] calldata userAddresses) external view returns (uint256[] memory netProfits) {
+        netProfits = new uint256[](userAddresses.length);
+        for (uint256 i = 0; i < userAddresses.length; i++) {
+            netProfits[i] = calculateNetProfit(userAddresses[i]);
+        }
+        return netProfits;
+    }
+
+    function getContractHealth() external view returns (
+        uint256 totalActiveUsers,
+        uint256 totalPendingClaims,
+        uint256 contractBalanceUSDT,
+        bool isSolvent
+    ) {
+        uint256 activeCount = 0;
+        uint256 pendingTotal = 0;
+        
+        // This is a simple check - in production you might want to optimize this
+        for (uint256 i = 0; i < migratedUsers.length && i < 100; i++) {
+            address user = migratedUsers[i];
+            if (users[user].isActive) {
+                activeCount++;
+            }
+            pendingTotal += pendingPoolClaim[user] + pendingROIClaim[user];
+        }
+        
+        uint256 balance = usdt.balanceOf(address(this));
+        return (activeCount, pendingTotal, balance, balance >= pendingTotal);
+    }
+
+    // ===================
+    // FALLBACK FUNCTIONS
+    // ===================
+
+    receive() external payable {
+        revert("Contract does not accept ETH");
+    }
+
+    fallback() external payable {
+        revert("Function not found");
     }
 }

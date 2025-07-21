@@ -21,7 +21,7 @@ module.exports = {
             'https://bsc-dataseed1.defibit.io/'
         ],
         // UPDATED: New contract address
-        contractAddress: '0xda2de615cBEABD197e80647B52ef227E750e63a7',
+        contractAddress: '0x9589580122444dc68E06a6F31F8F5DB74c48561F',
         usdtContractAddress: '0x55d398326f99059fF775485246999027B3197955',
         chainId: 56,
         networkName: 'BSC Mainnet'
